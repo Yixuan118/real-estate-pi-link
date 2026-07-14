@@ -1,0 +1,14 @@
+﻿node_modules/
+.real-estate-store/
+outputs/
+*.py
+*.zip
+github/
+*.log
+.DS_Store
+.env
+test-*.ts
+*.cjs
+firecrawl-skill-copy.ts
+
+.pi-runtime/

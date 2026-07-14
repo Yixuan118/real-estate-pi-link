@@ -1,0 +1,21 @@
+{
+  "name": "real-estate-monitor-backend",
+  "version": "1.0.0",
+  "description": "Multi-agent real estate search and monitoring backend (pi-collaborating-agents pattern)",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "tsx src/index.ts",
+    "build": "tsc",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "socket.io": "^4.7.0",
+    "socket.io-client": "^4.8.3",
+    "typescript": "^5.4.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "tsx": "^4.7.0"
+  }
+}

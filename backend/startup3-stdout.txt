@@ -1,0 +1,11 @@
+[Main] Backend starting...
+[Main] Storage: .real-estate-store
+[Main] LLM: deepseek-chat (configured)
+[Main] Firecrawl: configured
+[Main] Monitor interval: 3600s
+[Main] Backend ready. Frontend: open frontend/index.html
+[Main] WebSocket: ws://localhost:3742
+[Bridge] WebSocket bridge server running on port 3742
+[Bridge] Client connected: iN4X9enfg6TIgAePAAAB
+[PiRuntime] mode=agent-scrape, using .claude/skills/firecrawl-real-estate-scraper/SKILL.md + MCP search_properties tool
+[WatcherAgent] Started monitoring session 5b9af7c7-e68d-4fb5-b260-65a8afd5d7c9 every 3600000ms

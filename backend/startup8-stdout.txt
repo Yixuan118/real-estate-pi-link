@@ -1,0 +1,38 @@
+[Main] Backend starting...
+[Main] Storage: .real-estate-store
+[Main] LLM: deepseek-chat (configured)
+[Main] Firecrawl: configured
+[Main] Monitor interval: 3600s
+[Main] Backend ready. Frontend: open frontend/index.html
+[Main] WebSocket: ws://localhost:3742
+[Bridge] WebSocket bridge server running on port 3742
+[Bridge] Client connected: Y621YMfg7MBmEo3EAAAB
+[PiRuntime] mode=agent-scrape, using .claude/skills/firecrawl-real-estate-scraper/SKILL.md
+[PiRuntime] agent-scrape mode: scraping via Firecrawl...
+[FirecrawlSkill] Search: {"mustHave":[],"updatedAt":"2026-07-09T08:27:36.332Z","location":"Seattle","maxPrice":1000000,"minBedrooms":3,"propertyType":"house"}
+[FirecrawlSkill] Fetching: https://www.realtor.com/realestateandhomes-search/seattle_WA
+[FirecrawlSkill] Firecrawl response success=true hasData=yes
+[FirecrawlSkill] Got rawHtml: 1073096 chars
+[FirecrawlSkill] JSON-LD parsed: 42 listings
+[FirecrawlSkill] Bath values found: 0
+[FirecrawlSkill] JSON-LD yielded 42 filtered to 0
+[FirecrawlSkill] JSON-LD yielded 0, trying markdown...
+[FirecrawlSkill] Got markdown: 75372 chars
+[FirecrawlSkill] Page yielded 100 total, filtered down to 54 matching properties.
+[FirecrawlSkill] Parsed 54 properties from markdown
+[PiRuntime] Firecrawl returned 54 properties from realtor.com (via Firecrawl)
+[WatcherAgent] Started monitoring session 80d601af-8700-4fe9-8a02-6108c6502c80 every 3600000ms
+[PiRuntime] mode=agent-scrape, using .claude/skills/firecrawl-real-estate-scraper/SKILL.md
+[PiRuntime] agent-scrape mode: scraping via Firecrawl...
+[FirecrawlSkill] Search: {"mustHave":[],"updatedAt":"2026-07-09T08:30:28.235Z","location":"Athens","maxPrice":1000000,"minBedrooms":4,"propertyType":"house"}
+[FirecrawlSkill] Fetching: https://www.realtor.com/realestateandhomes-search/athens_GA
+[FirecrawlSkill] Firecrawl response success=true hasData=yes
+[FirecrawlSkill] Got rawHtml: 1150586 chars
+[FirecrawlSkill] JSON-LD parsed: 40 listings
+[FirecrawlSkill] Bath values found: 0
+[FirecrawlSkill] JSON-LD yielded 40 filtered to 0
+[FirecrawlSkill] JSON-LD yielded 0, trying markdown...
+[FirecrawlSkill] Got markdown: 74890 chars
+[FirecrawlSkill] Page yielded 100 total, filtered down to 25 matching properties.
+[FirecrawlSkill] Parsed 25 properties from markdown
+[PiRuntime] Firecrawl returned 25 properties from realtor.com (via Firecrawl)

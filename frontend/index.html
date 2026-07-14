@@ -1,0 +1,90 @@
+﻿<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>智能房产搜索监控系统</title>
+  <script src="socket.io.min.js"></script>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="app">
+    <header class="app-header">
+      <div class="header-brand">
+        <span class="brand-icon">🏠</span>
+        <h1>智能房产搜索监控系统</h1>
+      </div>
+      <div class="header-status">
+        <span class="status-indicator" id="connectionStatus">●</span>
+        <span id="statusText">连接中...</span>
+      </div>
+    </header>
+
+    <div class="main-layout">
+      <!-- Left: Chat + Activity -->
+      <div class="left-panel">
+        <!-- Activity Feed -->
+        <div class="activity-panel" id="activityPanel">
+          <div class="panel-header">
+            <h3>⚡ 智能体活动</h3>
+            <button class="clear-btn" id="clearActivity">清空</button>
+          </div>
+          <div class="activity-feed" id="activityFeed">
+            <div class="activity-item system">
+              <span class="activity-time">系统</span>
+              <span class="activity-text">正在启动智能体系统...</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Chat -->
+        <div class="chat-panel">
+          <div class="panel-header">
+            <h3>💬 对话</h3>
+          </div>
+          <div class="chat-messages" id="chatMessages">
+            <div class="message assistant">
+              <div class="message-avatar">🤖</div>
+              <div class="message-content">
+                <div class="message-sender">房产助手</div>
+                <div class="message-text">正在连接服务器...</div>
+              </div>
+            </div>
+          </div>
+          <div class="chat-input-area">
+            <textarea id="chatInput" placeholder="描述你理想中的房子，例如：我想在西雅图找一套3居室、预算100万以内的房子..." rows="2"></textarea>
+            <button id="sendBtn" disabled>发送</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Right: Criteria + Properties -->
+      <div class="right-panel">
+        <!-- Search Criteria -->
+        <div class="criteria-panel" id="criteriaPanel">
+          <div class="panel-header">
+            <h3>🔍 当前搜索条件</h3>
+            <button class="clear-btn" id="clearCriteria">重置</button>
+          </div>
+          <div class="criteria-body" id="criteriaBody">
+            <div class="criteria-empty">发送消息后，AI 将自动分析并更新搜索条件</div>
+          </div>
+        </div>
+
+        <!-- Properties -->
+        <div class="properties-panel" id="propertiesPanel">
+          <div class="panel-header">
+            <h3>🏘️ 匹配房源</h3>
+            <span class="property-count" id="propertyCount">0</span>
+          </div>
+          <div class="properties-grid" id="propertiesGrid">
+            <div class="properties-empty">暂无匹配房源，请在左侧输入您的需求</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

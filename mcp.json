@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "real-estate-monitor": {
+      "command": "npx",
+      "args": ["tsx", "backend/src/mcp/mcp-server.ts"],
+      "env": {
+        "FIRECRAWL_API_KEY": "${FIRECRAWL_API_KEY}",
+        "DEEPSEEK_API_KEY": "${DEEPSEEK_API_KEY}"
+      }
+    }
+  }
+}
