@@ -1,4 +1,4 @@
-export interface AppConfig {
+﻿export interface AppConfig {
   port: number;
   wsPort: number;
   storageDir: string;
@@ -11,7 +11,7 @@ export interface AppConfig {
 export function loadConfig(): AppConfig {
   return {
     port: parseInt(process.env.PORT || "3000", 10),
-    wsPort: parseInt(process.env.WS_PORT || "3742", 10),
+    wsPort: parseInt(process.env.WS_PORT || process.env.PORT || "3742", 10),
     storageDir: process.env.RE_STORAGE_DIR || "",
     llmApiKey: process.env.OPENAI_API_KEY || process.env.RE_LLM_KEY || process.env.DEEPSEEK_API_KEY || "",
     llmModel: process.env.RE_LLM_MODEL || "deepseek-chat",
