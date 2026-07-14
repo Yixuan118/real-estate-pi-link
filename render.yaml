@@ -1,0 +1,12 @@
+﻿name: real-estate-monitor
+services:
+  - type: web
+    name: real-estate-backend
+    env: node
+    buildCommand: cd backend && npm install
+    startCommand: cd backend && npx tsx src/index.ts
+    envVars:
+      - key: WS_PORT
+        value: "3742"
+      - key: PORT
+        value: "10000"
