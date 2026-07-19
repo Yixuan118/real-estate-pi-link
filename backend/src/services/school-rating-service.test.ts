@@ -1,0 +1,240 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { extractGreatSchoolsRating, extractSchoolEvidence, extractTargetSchoolRating, SchoolRatingService } from "./school-rating-service";
+
+test("extracts property-associated school ratings from Realtor listing data", () => {
+  const schools = extractSchoolEvidence(`
+    <script type="application/json">
+      {"schools":[
+        {"name":"Timothy Road Elementary School","rating":8,"grades":"PK-5"},
+        {"name":"Clarke Middle School","rating":9,"grades":"6-8"},
+        {"name":"Clarke Central High School","rating":8,"grades":"9-12"}
+      ]}
+    </script>
+  `, "https://www.realtor.com/realestateandhomes-detail/example");
+
+  assert.deepEqual(schools.map((school) => [school.name, school.rating, school.type]), [
+    ["Timothy Road Elementary School", 8, "elementary"],
+    ["Clarke Middle School", 9, "middle"],
+    ["Clarke Central High School", 8, "high"],
+  ]);
+  assert.ok(schools.every((school) => school.relationship === "listing-associated"));
+  assert.ok(schools.every((school) => school.assignmentSource === "realtor-listing"));
+});
+
+test("extracts Realtor listing-agent schools and compact circle ratings", () => {
+  const schools = extractSchoolEvidence(`
+    Schools From listing agent
+    Elementary School: Whitehead Road
+    Middle School: Burney Harris Lyons
+    High School: Clarke Central
+    Nearby schools Elementary Middle High Private
+    6 10 Whitehead Road Elementary School Grades K-5 | 0.5 mi away
+    7 10 Burney-Harris-Lyons Middle School Grades 6-8 | 2.0 mi away
+    5 10 Clarke Central High School Grades 9-12 | 3.6 mi away
+  `, "https://www.realtor.com/realestateandhomes-detail/example");
+
+  assert.deepEqual(schools.map((school) => [school.name, school.type, school.rating, school.relationship]), [
+    ["Whitehead Road Elementary School", "elementary", 6, "listing-associated"],
+    ["Burney-Harris-Lyons Middle School", "middle", 7, "listing-associated"],
+    ["Clarke Central High School", "high", 5, "listing-associated"],
+  ]);
+  assert.deepEqual(schools.map((school) => school.distanceMiles), [0.5, 2, 3.6]);
+});
+
+test("extracts property-associated schools from Realtor's server-rendered nearby-school links", () => {
+  const content = `The schools near 1080 Belmont Rd, include
+    [Whit Davis Road Elementary School](https://www.realtor.com/local/schools/Whit-Davis-Road-Elementary-School-0718577561),
+    [Cedar Shoals High School](https://www.realtor.com/local/schools/Cedar-Shoals-High-School-0718577431) and
+    [Hilsman Middle School](https://www.realtor.com/local/schools/Hilsman-Middle-School-0718577401).
+    Nearby Cities`;
+  const schools = extractSchoolEvidence(content, "https://www.realtor.com/example", "realtor-listing");
+  assert.deepEqual(schools.map((school) => [school.name, school.type, school.relationship]), [
+    ["Whit Davis Road Elementary School", "elementary", "listing-associated"],
+    ["Cedar Shoals High School", "high", "listing-associated"],
+    ["Hilsman Middle School", "middle", "listing-associated"],
+  ]);
+});
+
+test("recursively extracts complete schools from nested Realtor page JSON", () => {
+  const content = `<script id="__NEXT_DATA__" type="application/json">${JSON.stringify({
+    props: { pageProps: { property: { neighborhood: { schools: [
+      {
+        name: "Whitehead Road Elementary School", rating: { value: 6 }, grades: "K-5",
+        distance_in_miles: 0.5, student_count: 601, review_count: 14,
+        href: "/local/schools/Whitehead-Road-Elementary-School-0001",
+      },
+      {
+        school_name: "Burney-Harris-Lyons Middle School", greatSchoolsRating: 7,
+        grade_levels: ["6", "8"], distanceMiles: "2.0 mi", students: "647", reviews: 11,
+      },
+      {
+        schoolName: "Clarke Central High School", gsRating: { score: 5 }, gradesServed: "9-12",
+        distance_miles: 3.6, enrollment: 1909, reviewCount: 2,
+      },
+      { name: "Clarke County School District", rating: 10 },
+    ] } } } },
+  })}</script>`;
+
+  const schools = extractSchoolEvidence(content, "https://www.realtor.com/realestateandhomes-detail/example");
+
+  assert.equal(schools.length, 3);
+  assert.deepEqual(schools.map((school) => [school.name, school.rating, school.type]), [
+    ["Whitehead Road Elementary School", 6, "elementary"],
+    ["Burney-Harris-Lyons Middle School", 7, "middle"],
+    ["Clarke Central High School", 5, "high"],
+  ]);
+  assert.deepEqual(
+    schools.map((school) => [school.grades, school.distanceMiles, school.studentCount, school.reviewCount]),
+    [["K-5", 0.5, 601, 14], ["6-8", 2, 647, 11], ["9-12", 3.6, 1909, 2]],
+  );
+  assert.ok(schools.every((school) => school.relationship === "listing-associated"));
+});
+
+test("recovers school arrays embedded in escaped Next.js flight payloads", () => {
+  const payload = JSON.stringify({ schools: [{
+    name: "Example Elementary School", rating: 8, grades: "PK-5", distance_in_miles: 1.25,
+  }] }).replace(/"/g, '\\"');
+  const content = `<script>self.__next_f.push([1,"${payload}"])</script>`;
+  const schools = extractSchoolEvidence(content, "https://www.realtor.com/realestateandhomes-detail/example");
+  assert.deepEqual(schools.map((school) => [school.name, school.rating, school.grades, school.distanceMiles]), [
+    ["Example Elementary School", 8, "PK-5", 1.25],
+  ]);
+});
+
+test("targeted Firecrawl lookup is domain-limited and cached", async () => {
+  let calls = 0;
+  const mockFetch = (async (_url: string, init?: RequestInit) => {
+    calls += 1;
+    const body = JSON.parse(String(init?.body));
+    if (String(_url).endsWith("/v2/scrape")) {
+      return new Response(JSON.stringify({ data: { markdown: "# Clarke Central High School\n5/10 GreatSchools Rating\n## Nearby Schools\n4/10 Other School" } }), { status: 200 });
+    }
+    assert.deepEqual(body.includeDomains, ["realtor.com", "greatschools.org"]);
+    return new Response(JSON.stringify({
+      data: { web: [{
+        title: "Homes for Sale near Clarke Central High School",
+        description: "Clarke Central High School, Athens, GA - possibly stale rating",
+        markdown: "# Clarke Central High School\nAthens, GA\n5/10 GreatSchools Rating\n## Nearby Schools\n4/10 Other School",
+        url: "https://www.realtor.com/local/schools/Clarke-Central-High-School-0718577361",
+      }] },
+    }), { status: 200, headers: { "Content-Type": "application/json" } });
+  }) as typeof fetch;
+  const service = new SchoolRatingService("test-key", mockFetch);
+
+  const first = await service.lookupSchool("Clarke Central High School", "Athens, GA");
+  const second = await service.lookupSchool("Clarke Central High School", "Athens, GA");
+  assert.equal(first[0]?.name, "Clarke Central High School");
+  assert.equal(first[0]?.rating, 5);
+  assert.equal(second[0]?.sourceUrl.includes("greatschools.org"), true);
+  assert.equal(calls, 1);
+});
+
+test("does not attribute a district ranking or nearby-school score to the requested school", async () => {
+  const mockFetch = (async (input: string | URL) => new Response(JSON.stringify(String(input).endsWith("/v2/scrape") ? {
+    data: { markdown: "# Burney-Harris-Lyons Middle School\n7/10 GreatSchools Rating\n## Nearby Schools\n4/10 Cleveland Road Elementary School" },
+  } : {
+    data: { web: [
+      {
+        title: "Best Middle Schools in Clarke County School District",
+        description: "Burney-Harris-Lyons Middle School appears in this district. Top school: 9/10 GreatSchools Rating.",
+        url: "https://www.greatschools.org/best-middle-schools/georgia/athens/clarke-county-school-district/",
+      },
+      {
+        title: "Burney-Harris-Lyons Middle School",
+        description: "Burney-Harris-Lyons Middle School, Athens, GA. 7/10 GreatSchools Rating.",
+        url: "https://www.greatschools.org/georgia/athens/424-Burney-Harris-Lyons-Middle-School/",
+      },
+    ] },
+  }), { status: 200, headers: { "Content-Type": "application/json" } })) as typeof fetch;
+  const service = new SchoolRatingService("test-key", mockFetch);
+
+  const result = await service.lookupSchool("Burney-Harris-Lyons Middle School", "Athens, GA");
+
+  assert.equal(result.length, 1);
+  assert.equal(result[0]?.rating, 7);
+  assert.match(result[0]?.sourceUrl || "", /\/424-Burney-Harris-Lyons-Middle-School\/?$/);
+});
+
+test("resolves known official-name aliases without changing the assigned school name", async () => {
+  let requestedUrl = "";
+  const mockFetch = (async (_input: string | URL, init?: RequestInit) => {
+    requestedUrl = String(JSON.parse(String(init?.body || "{}")).url || "");
+    return new Response(JSON.stringify({ data: {
+      markdown: "# Whit Davis Road Elementary School\nAthens, GA\n5/10 GreatSchools Rating",
+    } }), { status: 200, headers: { "Content-Type": "application/json" } });
+  }) as typeof fetch;
+
+  const result = await new SchoolRatingService("test-key", mockFetch).lookupSchool("Whit Davis Elementary School", "Athens, GA");
+
+  assert.match(requestedUrl, /431-Whit-Davis-Road-Elementary-School/);
+  assert.equal(result[0]?.name, "Whit Davis Elementary School");
+  assert.equal(result[0]?.rating, 5);
+});
+
+test("target school rating extraction stops before nearby schools", () => {
+  assert.equal(extractTargetSchoolRating(
+    "# Burney-Harris-Lyons Middle School\n## Nearby Schools\n4/10 GreatSchools Rating Cleveland Road Elementary",
+    "Burney-Harris-Lyons Middle School",
+  ), undefined);
+  assert.equal(extractTargetSchoolRating(
+    "# Clarke Central High School\n5/10 GreatSchools Rating\n## Nearby Schools\n4/10 Other School",
+    "Clarke Central High School",
+  ), 5);
+  assert.equal(extractTargetSchoolRating(
+    `# Timothy Elementary School\n${"Profile details without a score. ".repeat(60)}8/10 GreatSchools Rating\nOconee County Elementary School`,
+    "Timothy Elementary School",
+  ), undefined);
+  assert.equal(extractTargetSchoolRating(
+    `# Timothy Elementary School\n7/10 GreatSchools Rating\n${"More profile details. ".repeat(100)}8/10 GreatSchools Rating\nNearby School`,
+    "Timothy Elementary School",
+  ), 7);
+});
+
+test("parses the rating formats used by Realtor and GreatSchools pages", () => {
+  assert.equal(extractGreatSchoolsRating("6 out of 10 GreatSchools Rating"), 6);
+  assert.equal(extractGreatSchoolsRating("Clarke Middle School 5/10 GreatSchools Rating"), 5);
+  assert.equal(extractGreatSchoolsRating("GreatSchools Rating: 8/10"), 8);
+  assert.equal(extractGreatSchoolsRating("Parent review: 10 out of 10"), undefined);
+});
+
+test("strict assignment mode does not spend Firecrawl calls on an address with no official schools", async () => {
+  let calls = 0;
+  const mockFetch = (async () => {
+    calls += 1;
+    throw new Error("should not be called");
+  }) as typeof fetch;
+  const service = new SchoolRatingService("test-key", mockFetch);
+  const property = {
+    id: "p1", title: "1 Missing St, Athens, GA", price: 1, bedrooms: 1, bathrooms: 1, sqft: 1,
+    location: "Athens, GA", features: [], url: "", listedAt: new Date().toISOString(), source: "test",
+  };
+
+  const enriched = await service.enrichProperty(property, "Athens, GA", { strictAssignment: true });
+
+  assert.equal(calls, 0);
+  assert.equal(enriched.schools?.length || 0, 0);
+});
+
+test("persists school ratings across service restarts", async () => {
+  let calls = 0;
+  const mockFetch = (async () => {
+    calls += 1;
+    return new Response(JSON.stringify({ data: {
+      markdown: "# Clarke Middle School\nAthens, GA\n4/10 GreatSchools Rating",
+    } }), { status: 200, headers: { "Content-Type": "application/json" } });
+  }) as typeof fetch;
+  const cacheFile = join(mkdtempSync(join(tmpdir(), "school-cache-")), "ratings.json");
+
+  const first = await new SchoolRatingService("test-key", mockFetch, cacheFile)
+    .lookupSchool("Clarke Middle School", "Athens, GA");
+  const second = await new SchoolRatingService("test-key", mockFetch, cacheFile)
+    .lookupSchool("Clarke Middle School", "Athens, GA");
+
+  assert.equal(first[0]?.rating, 4);
+  assert.equal(second[0]?.rating, 4);
+  assert.equal(calls, 1);
+});

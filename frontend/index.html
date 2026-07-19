@@ -1,22 +1,26 @@
 ﻿<!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>智能房产搜索监控系统</title>
-  <script src="socket.io.min.js"></script>
-  <link rel="stylesheet" href="style.css">
+  <meta name="description" content="Evidence-backed, multi-agent real estate search with listing, school, map, and neighborhood validation.">
+  <title>Property Evidence AI</title>
+  <script src="socket.io.min.js?v=mentor-20260718"></script>
+  <link rel="stylesheet" href="style.css?v=pi-only-20260719">
 </head>
 <body>
   <div id="app">
     <header class="app-header">
       <div class="header-brand">
-        <span class="brand-icon">🏠</span>
-        <h1>智能房产搜索监控系统</h1>
+        <span class="brand-mark" aria-hidden="true">PE</span>
+        <div>
+          <h1>Property Evidence AI</h1>
+          <p>Pi collaborating agents with source-backed verification</p>
+        </div>
       </div>
       <div class="header-status">
         <span class="status-indicator" id="connectionStatus">●</span>
-        <span id="statusText">连接中...</span>
+        <span id="statusText">Connecting…</span>
       </div>
     </header>
 
@@ -26,13 +30,13 @@
         <!-- Activity Feed -->
         <div class="activity-panel" id="activityPanel">
           <div class="panel-header">
-            <h3>⚡ 智能体活动</h3>
-            <button class="clear-btn" id="clearActivity">清空</button>
+            <h3><span class="panel-kicker">Live</span> Agent activity</h3>
+            <button class="clear-btn" id="clearActivity">Clear</button>
           </div>
           <div class="activity-feed" id="activityFeed">
             <div class="activity-item system">
-              <span class="activity-time">系统</span>
-              <span class="activity-text">正在启动智能体系统...</span>
+              <span class="activity-time">System</span>
+              <span class="activity-text">Starting the agent workspace…</span>
             </div>
           </div>
         </div>
@@ -40,20 +44,28 @@
         <!-- Chat -->
         <div class="chat-panel">
           <div class="panel-header">
-            <h3>💬 对话</h3>
+            <div>
+              <h3>Research assistant</h3>
+              <p class="panel-description">Describe the home you want in natural language.</p>
+            </div>
           </div>
           <div class="chat-messages" id="chatMessages">
-            <div class="message assistant">
+            <div class="message assistant" data-placeholder="true">
               <div class="message-avatar">🤖</div>
               <div class="message-content">
-                <div class="message-sender">房产助手</div>
-                <div class="message-text">正在连接服务器...</div>
+                <div class="message-sender">Property Assistant</div>
+                <div class="message-text">Connecting to the research service…</div>
               </div>
             </div>
           </div>
+          <div class="example-prompts" aria-label="Example searches">
+            <button class="prompt-chip" data-prompt="Find homes in Athens, GA with four-sided brick, a community lake, a supermarket within 3 driving miles, UGA within 30 driving miles, and assigned K–12 schools all rated at least 5/10 with at least one rated 8/10.">Complex evidence search</button>
+            <button class="prompt-chip" data-prompt="Find 3-bedroom homes in Seattle, WA under $1,000,000.">Seattle starter search</button>
+            <button class="prompt-chip" data-prompt="Find homes in Athens, GA within 3 driving miles of legal access to GA-316.">GA-316 access</button>
+          </div>
           <div class="chat-input-area">
-            <textarea id="chatInput" placeholder="描述你理想中的房子，例如：我想在西雅图找一套3居室、预算100万以内的房子..." rows="2"></textarea>
-            <button id="sendBtn" disabled>发送</button>
+            <textarea id="chatInput" placeholder="Example: Find an Athens home with four-sided brick and strong assigned schools…" rows="2" aria-label="Property search request"></textarea>
+            <button id="sendBtn" disabled>Search</button>
           </div>
         </div>
       </div>
@@ -63,28 +75,39 @@
         <!-- Search Criteria -->
         <div class="criteria-panel" id="criteriaPanel">
           <div class="panel-header">
-            <h3>🔍 当前搜索条件</h3>
-            <button class="clear-btn" id="clearCriteria">重置</button>
+            <div>
+              <h3>Search criteria</h3>
+              <p class="panel-description">Extracted from your request</p>
+            </div>
+            <button class="clear-btn" id="clearCriteria">Reset view</button>
           </div>
           <div class="criteria-body" id="criteriaBody">
-            <div class="criteria-empty">发送消息后，AI 将自动分析并更新搜索条件</div>
+            <div class="criteria-empty">Your parsed requirements will appear here.</div>
           </div>
         </div>
 
         <!-- Properties -->
         <div class="properties-panel" id="propertiesPanel">
           <div class="panel-header">
-            <h3>🏘️ 匹配房源</h3>
-            <span class="property-count" id="propertyCount">0</span>
+            <div>
+              <h3>Evidence-ranked properties</h3>
+              <p class="panel-description">Verified matches appear first; unknown is never treated as satisfied.</p>
+            </div>
+            <div class="results-meta">
+              <span class="legend verified">Verified</span>
+              <span class="legend unknown">Unknown</span>
+              <span class="legend failed">Failed</span>
+              <span class="property-count" id="propertyCount">0</span>
+            </div>
           </div>
           <div class="properties-grid" id="propertiesGrid">
-            <div class="properties-empty">暂无匹配房源，请在左侧输入您的需求</div>
+            <div class="properties-empty"><strong>Ready to research.</strong><br>Start with an example or describe your own criteria.</div>
           </div>
         </div>
       </div>
     </div>
   </div>
 
-  <script src="app.js"></script>
+  <script src="app.js?v=pi-only-20260719"></script>
 </body>
 </html>

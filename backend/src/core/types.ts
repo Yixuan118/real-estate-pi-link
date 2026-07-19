@@ -44,7 +44,10 @@ export interface Property {
   price: number;
   bedrooms: number;
   bathrooms: number;
+  fullBathrooms?: number;
+  halfBathrooms?: number;
   sqft: number;
+  sqftSource?: "structured-data" | "listing-card" | "detail-page" | "cached";
   location: string;
   features: string[];
   url: string;
@@ -53,8 +56,121 @@ export interface Property {
   source: string;
   latitude?: number;
   longitude?: number;
+  coordinateSource?: "listing" | "google-geocoding" | "here-geocoding";
   description?:string;
-  schools?: Array<{name:string;rating:number;type:string}>;
+  listingFacts?: Record<string, string[]>;
+  listingEvidenceText?: string;
+  listingEvidenceSourceUrl?: string;
+  schools?: SchoolEvidence[];
+  schoolDistricts?: SchoolDistrictEvidence[];
+  exteriorMaterials?: string[];
+  exteriorCoverage?: "all-sides" | "partial" | "unknown";
+  communityFeatures?: string[];
+  nearbyWaterBodies?: Array<{
+    name: string;
+    type: "lake-pond" | "reservoir" | "waterbody";
+    distanceMiles: number;
+    areaAcres?: number;
+    source: "USGS 3D Hydrography Program" | "HERE";
+    sourceUrl: string;
+    checkedAt: string;
+  }>;
+  featureEvidence?: Array<{
+    criterion: "all-sides-brick" | "community-lake";
+    sourceUrl: string;
+    source: "targeted-web-search";
+    checkedAt: string;
+  }>;
+  nearbyPlaces?: Array<{
+    name: string;
+    category: "grocery" | "university" | "other";
+    distanceMiles: number;
+    source: "listing" | "calculated";
+    placeId?: string;
+    distanceMode?: "driving" | "straight-line";
+    checkedAt?: string;
+  }>;
+  distanceEvaluations?: Array<{
+    name: string;
+    category: "grocery" | "university" | "other";
+    maxMiles: number;
+    status: ConstraintMatchStatus;
+    distanceMiles?: number;
+    detail: string;
+    source: "google-maps" | "here" | "listing" | "calculated";
+    distanceMode: "driving" | "straight-line";
+    checkedAt: string;
+  }>;
+  highwayAccessEvaluation?: {
+    highwayName: string;
+    maxMiles: number;
+    status: ConstraintMatchStatus;
+    distanceMiles?: number;
+    accessName?: string;
+    detail: string;
+    source: "here";
+    distanceMode: "driving";
+    checkedAt: string;
+  };
+  criteriaMatch?: PropertyCriteriaMatch;
+  evidenceDiagnostics?: Array<{
+    stage: "listing-detail" | "listing-search" | "school-district" | "school-assignment" | "school-rating" | "geocoding" | "poi-search" | "waterbody-search" | "routing" | "highway-routing" | "geo-provider";
+    status: "success" | "warning" | "error";
+    detail: string;
+  }>;
+}
+
+export interface SchoolEvidence {
+  name: string;
+  rating?: number;
+  scale: 10;
+  type: "elementary" | "middle" | "high" | "k12" | "other";
+  grades?: string;
+  distanceMiles?: number;
+  studentCount?: number;
+  reviewCount?: number;
+  ratingSource: "GreatSchools" | "unknown";
+  evidenceSource: "realtor-listing" | "realtor-school-page" | "greatschools-page" | "firecrawl-search" | "official-locator";
+  sourceUrl: string;
+  relationship: "nearby" | "listing-associated" | "assigned" | "assignment-option" | "unknown";
+  assignmentGroup?: string;
+  assignmentGroupSize?: number;
+  assignmentSource?: "official-locator" | "realtor-listing";
+  assignmentSourceUrl?: string;
+  checkedAt: string;
+}
+
+export interface SchoolDistrictEvidence {
+  name: string;
+  geoid: string;
+  level: "elementary" | "secondary" | "unified";
+  lowGrade?: string;
+  highGrade?: string;
+  source: "US Census/NCES";
+  sourceUrl: string;
+  checkedAt: string;
+}
+
+export type ConstraintMatchStatus = "verified" | "failed" | "unknown";
+
+export interface ConstraintMatch {
+  criterion: string;
+  status: ConstraintMatchStatus;
+  detail: string;
+}
+
+export interface PropertyCriteriaMatch {
+  overall: ConstraintMatchStatus;
+  score: number;
+  checks: ConstraintMatch[];
+}
+
+export interface DistanceConstraint {
+  name: string;
+  maxMiles: number;
+  category?: "grocery" | "university" | "other";
+  lat?: number;
+  lng?: number;
 }
 
 export interface SearchCriteria {
@@ -67,8 +183,11 @@ export interface SearchCriteria {
   mustHave: string[];
   exteriorMaterials?: string[];
   communityFeatures?: string[];
-  distanceConstraints?: Array<{ name: string; lat: number; lng: number; maxMiles: number }>;
+  distanceConstraints?: DistanceConstraint[];
   schoolMinRating?: number;
+  schoolAtLeastOneRating?: number;
+  schoolAssignmentRequired?: boolean;
+  schoolAlternativePolicy?: "any-eligible-option" | "strict-unique-assignment";
   highwayAccess?: { highwayName: string; maxMiles: number };
   updatedAt: string;
 }
@@ -86,6 +205,9 @@ export function defaultSearchCriteria(): SearchCriteria {
     communityFeatures: undefined,
     distanceConstraints: undefined,
     schoolMinRating: undefined,
+    schoolAtLeastOneRating: undefined,
+    schoolAssignmentRequired: undefined,
+    schoolAlternativePolicy: "any-eligible-option",
     highwayAccess: undefined,
     updatedAt: new Date().toISOString(),
   };

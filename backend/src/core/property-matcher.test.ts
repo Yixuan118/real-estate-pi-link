@@ -1,0 +1,377 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { defaultSearchCriteria, Property } from "./types";
+import { regexExtract } from "./llm-service";
+import { assessProperty, extractCoreListingMetrics, extractListingFacts, extractPropertyEvidence, haversineMiles } from "./property-matcher";
+
+test("uses full and half bathroom evidence instead of an incomplete summary count", () => {
+  const metrics = extractCoreListingMetrics(
+    "287 Pondview Dr, Athens, GA 30605 · 4 bd · 2 ba · 1 half ba · 1,809 sqft",
+    "287 Pondview Dr, Athens, GA 30605",
+  );
+  assert.deepEqual(metrics, { bathrooms: 3, fullBathrooms: 2, halfBathrooms: 1 });
+});
+
+test("explicit living area overrides a nearby lot-size-like card value", () => {
+  const metrics = extractCoreListingMetrics(
+    "10 Main St, Boise, ID 83702 Living Area: 1,809 sqft Lot Size: 7,405 sqft 3 beds 2 baths 7,405 sqft",
+    "10 Main St, Boise, ID 83702",
+  );
+  assert.equal(metrics.sqft, 1809);
+  assert.equal(metrics.sqftSource, "detail-page");
+});
+
+test("1080 Belmont Realtor Schools panel produces a failed rating check instead of unknown", () => {
+  const property: Property = {
+    id: "belmont", title: "1080 Belmont Rd, Athens, GA 30605", price: 199000,
+    bedrooms: 2, bathrooms: 1, sqft: 1164, location: "Athens, GA 30605", features: [],
+    url: "https://www.realtor.com/realestateandhomes-detail/1080-Belmont-Rd_Athens_GA_30605_M53905-58944",
+    listedAt: new Date().toISOString(), source: "Realtor.com",
+  };
+  const detail = `
+    Schools From listing agent Elementary School: Whit Davis High School: Cedar Shoals Middle School: Hilsman
+    Nearby schools Elementary Middle High Private
+    5 10 5 out of 10 Whit Davis Road Elementary School Grades K-5 | 3.4 mi away | 346 students | 6 reviews
+    3 10 3 out of 10 Hilsman Middle School Grades 6-8 | 5.5 mi away | 609 students | 9 reviews
+    2 10 2 out of 10 Cedar Shoals High School Grades 9-12 | 5.0 mi away | 1508 students | 8 reviews
+    Ratings provided by GreatSchools.org
+  `;
+  const enriched = extractPropertyEvidence(property, detail);
+  assert.deepEqual(enriched.schools?.map((school) => [school.name, school.rating]), [
+    ["Whit Davis Road Elementary School", 5], ["Hilsman Middle School", 3], ["Cedar Shoals High School", 2],
+  ]);
+  const match = assessProperty(enriched, {
+    ...defaultSearchCriteria(), location: "Athens, GA", schoolMinRating: 5,
+    schoolAtLeastOneRating: 8, schoolAssignmentRequired: true,
+  });
+  assert.equal(match.overall, "failed");
+  assert.equal(match.checks.at(-1)?.status, "failed");
+});
+
+test("extracts an arbitrary bare US city after a location preposition", () => {
+  const result = regexExtract("Find homes in Boise with 3 bedrooms", defaultSearchCriteria());
+  assert.equal(result.criteria.location, "Boise");
+});
+
+test("extracts the mixed Chinese and English complex query", () => {
+  const result = regexExtract(
+    "房子四面墙是砖墙，小区里有湖，离supermarket or large grocery store不超过三英里，离UGA不超过30英里。",
+    defaultSearchCriteria(),
+  );
+  assert.equal(result.criteria.location, "Athens, GA");
+  assert.deepEqual(result.criteria.exteriorMaterials, ["brick"]);
+  assert.deepEqual(result.criteria.communityFeatures, ["lake"]);
+  assert.equal(result.criteria.distanceConstraints?.find((item) => item.category === "grocery")?.maxMiles, 3);
+  assert.equal(result.criteria.distanceConstraints?.find((item) => item.name === "UGA")?.maxMiles, 30);
+});
+
+test("extracts a GA-316 nearest-access driving constraint", () => {
+  const result = regexExtract(
+    "找 Athens 的房子，离 GA-316 最近的入口不超过 3 英里。",
+    defaultSearchCriteria(),
+  );
+  assert.deepEqual(result.criteria.highwayAccess, { highwayName: "GA-316", maxMiles: 3 });
+});
+
+test("verifies basic location and bedroom criteria instead of marking every result unknown", () => {
+  const property: Property = {
+    id: "basic-1", title: "Seattle home", price: 650000, bedrooms: 3, bathrooms: 2, sqft: 1600,
+    location: "Seattle, WA", features: [], url: "", listedAt: new Date().toISOString(), source: "test",
+  };
+  const match = assessProperty(property, {
+    ...defaultSearchCriteria(), location: "Seattle, WA", minBedrooms: 3,
+  });
+  assert.equal(match.overall, "verified");
+  assert.equal(match.checks.length, 2);
+});
+
+test("fails basic search results from the wrong market or below the bedroom minimum", () => {
+  const property: Property = {
+    id: "basic-2", title: "Atlanta home", price: 400000, bedrooms: 2, bathrooms: 2, sqft: 1400,
+    location: "Atlanta, GA", features: [], url: "", listedAt: new Date().toISOString(), source: "test",
+  };
+  const match = assessProperty(property, {
+    ...defaultSearchCriteria(), location: "Seattle, WA", minBedrooms: 3,
+  });
+  assert.equal(match.overall, "failed");
+  assert.equal(match.checks.filter((check) => check.status === "failed").length, 2);
+});
+
+test("extracts evidence and verifies all complex constraints", () => {
+  const base: Property = {
+    id: "p1", title: "Athens home", price: 500000, bedrooms: 4, bathrooms: 3, sqft: 2400,
+    location: "Athens, GA", features: [], url: "", listedAt: new Date().toISOString(), source: "test",
+  };
+  const property = extractPropertyEvidence(base, `
+    <p>Four-sided brick home in a neighborhood with a community lake.</p>
+    <p>Publix grocery store 2.4 miles from the property.</p>
+    <script>{"latitude":33.95,"longitude":-83.38}</script>
+  `);
+  const match = assessProperty(property, {
+    ...defaultSearchCriteria(),
+    exteriorMaterials: ["brick"], communityFeatures: ["lake"],
+    distanceConstraints: [
+      { name: "supermarket", category: "grocery", maxMiles: 3 },
+      { name: "UGA", category: "university", maxMiles: 30, lat: 33.948, lng: -83.3773 },
+    ],
+  });
+  assert.equal(match.overall, "verified");
+  assert.equal(match.score, 100);
+});
+
+test("does not treat a generic brick mention as four-sided brick", () => {
+  const property = extractPropertyEvidence({
+    id: "p2", title: "Brick-front home", price: 400000, bedrooms: 3, bathrooms: 2, sqft: 1800,
+    location: "Athens, GA", features: [], url: "", listedAt: new Date().toISOString(), source: "test",
+  }, "This home has a brick front accent.");
+  const match = assessProperty(property, { ...defaultSearchCriteria(), exteriorMaterials: ["brick"] });
+  assert.equal(match.overall, "failed");
+});
+
+test("extracts brick and lake evidence embedded in listing JSON scripts", () => {
+  const property = extractPropertyEvidence({
+    id: "p3", title: "320 Kings Rd", price: 375000, bedrooms: 4, bathrooms: 2, sqft: 1985,
+    location: "Athens, GA", features: [], url: "", listedAt: new Date().toISOString(), source: "test",
+  }, '<script type="application/json">{"description":"Four-sided brick home","communityAmenities":["Lake"]}</script>');
+  assert.equal(property.exteriorCoverage, "all-sides");
+  assert.deepEqual(property.communityFeatures, ["lake"]);
+});
+
+test("recognizes HOA lake amenities in either sentence order without using mere proximity", () => {
+  const base: Property = {
+    id: "hoa-lake", title: "Athens home", price: 300000, bedrooms: 3, bathrooms: 2, sqft: 1500,
+    location: "Athens, GA", features: [], url: "", listedAt: new Date().toISOString(), source: "test",
+  };
+  assert.deepEqual(extractPropertyEvidence(base, "Association Amenities: walking trails and a lake for residents.").communityFeatures, ["lake"]);
+  assert.deepEqual(extractPropertyEvidence(base, "The lake is maintained by the HOA and available to residents.").communityFeatures, ["lake"]);
+  assert.deepEqual(extractPropertyEvidence(base, "A public lake is located 2 miles from the property.").communityFeatures, []);
+});
+
+test("extracts Realtor detail-page brick, groceries, and score-first school evidence", () => {
+  const property = extractPropertyEvidence({
+    id: "kings-rd", title: "320 Kings Rd", price: 375000, bedrooms: 4, bathrooms: 2, sqft: 1985,
+    location: "Athens, GA 30606", features: [], url: "https://www.realtor.com/kings-rd",
+    listedAt: new Date().toISOString(), source: "test",
+  }, `
+    Construction Materials: Brick
+    Architectural Style: Brick 4 Side, Ranch
+    ## Neighborhood & schools
+    Groceries
+    ALDI (0.6 mi), R and A Seafood Market (0.9 mi)
+    Shopping
+    ## Schools
+    7 10 7 out of 10
+    Timothy Elementary School
+    Grades K-5
+    4 10 4 out of 10
+    Clarke Middle School
+    Grades 6-8
+    5 10 5 out of 10
+    Clarke Central High School
+    Grades 9-12
+  `);
+
+  assert.equal(property.exteriorCoverage, "all-sides");
+  assert.deepEqual(property.listingFacts?.["Listing: Architectural Style"], ["Brick 4 Side, Ranch"]);
+  assert.deepEqual(property.nearbyPlaces?.slice(0, 2).map((place) => [place.name, place.distanceMiles]), [
+    ["ALDI", 0.6], ["R and A Seafood Market", 0.9],
+  ]);
+  assert.deepEqual(property.schools?.map((school) => [school.name, school.rating, school.type]), [
+    ["Timothy Elementary School", 7, "elementary"],
+    ["Clarke Middle School", 4, "middle"],
+    ["Clarke Central High School", 5, "high"],
+  ]);
+  assert.equal(assessProperty(property, { ...defaultSearchCriteria(), mustHave: ["brick ranch style"] }).overall, "verified");
+});
+
+test("listing evidence snapshot excludes Realtor page chrome and keeps property facts", () => {
+  const facts = extractListingFacts(`
+    ## Neighborhood & schools
+    Home buyers reveal: 'What I wish I had known before buying my first home'
+    Realtor.com checked: A few minutes ago | Listing last updated:
+    Source: GeorgiaMLS, MLS #10801902
+    This property has multiple listings: For Sale listing 1 | For Sale listing 2
+    ## Exterior
+    Construction Materials: Brick
+    Architectural Style: Brick 4 Side, Ranch
+    Community Features: Lake, Sidewalks
+    Year Built: 1983
+  `);
+  assert.deepEqual(facts, {
+    "Exterior: Construction Materials": ["Brick"],
+    "Exterior: Architectural Style": ["Brick 4 Side, Ranch"],
+    "Exterior: Community Features": ["Lake, Sidewalks"],
+    "Exterior: Year Built": ["1983"],
+  });
+});
+
+test("repairs missing core metrics from a Realtor detail summary", () => {
+  const summary = "153 Ponderosa Dr, Athens, GA 30605 beds 2 baths 2 sqft square feet 1,570 sqft lot 8,276 year built 1983";
+  assert.deepEqual(extractCoreListingMetrics(summary, "153 Ponderosa Dr, Athens, GA 30605"), {
+    bedrooms: 2, bathrooms: 2, sqft: 1570, sqftSource: "listing-card",
+  });
+  const property = extractPropertyEvidence({
+    id: "ponderosa", title: "153 Ponderosa Dr, Athens, GA 30605", price: 299000,
+    bedrooms: 2, bathrooms: 0, sqft: 1570, location: "Athens, GA 30605", features: [], url: "",
+    listedAt: new Date().toISOString(), source: "test",
+  }, summary);
+  assert.equal(property.bathrooms, 2);
+});
+
+test("treats unavailable bedroom and bathroom counts as unknown rather than zero", () => {
+  const property: Property = {
+    id: "missing-core", title: "Athens listing", price: 300000, bedrooms: 0, bathrooms: 0, sqft: 0,
+    location: "Athens, GA", features: [], url: "", listedAt: new Date().toISOString(), source: "test",
+  };
+  const match = assessProperty(property, {
+    ...defaultSearchCriteria(), location: "Athens, GA", minBedrooms: 3, minBathrooms: 2,
+  });
+  assert.equal(match.overall, "unknown");
+  assert.deepEqual(match.checks.slice(-2).map((check) => check.status), ["unknown", "unknown"]);
+});
+
+test("computes stable straight-line distances", () => {
+  assert.ok(haversineMiles(33.95, -83.38, 33.948, -83.3773) < 1);
+});
+
+test("extracts a Chinese K-12 rating threshold without an LLM", () => {
+  const result = regexExtract("我想找 Athens 的房子，所在的 K-12 school 打分在8以上", defaultSearchCriteria());
+  assert.equal(result.criteria.schoolMinRating, 8);
+  assert.equal(result.criteria.schoolAssignmentRequired, true);
+});
+
+test("extracts a compound assigned-school rating rule without leaking it into mustHave", () => {
+  const result = regexExtract(
+    "我想找 Athens, GA 的房子，所在小学、初中、高中评分均不低于5，其中至少一所不低于8",
+    defaultSearchCriteria(),
+  );
+  assert.equal(result.criteria.schoolMinRating, 5);
+  assert.equal(result.criteria.schoolAtLeastOneRating, 8);
+  assert.equal(result.criteria.schoolAssignmentRequired, true);
+  assert.equal(result.criteria.mustHave, undefined);
+});
+
+test("verifies all assigned schools at five with at least one at eight", () => {
+  const checkedAt = new Date().toISOString();
+  const property: Property = {
+    id: "compound-school", title: "Athens home", price: 400000, bedrooms: 3, bathrooms: 2, sqft: 1800,
+    location: "Athens, GA", features: [], url: "", listedAt: checkedAt, source: "test",
+    schools: [
+      assignedSchool("Elementary", "elementary", 5, checkedAt),
+      assignedSchool("Middle", "middle", 8, checkedAt),
+      assignedSchool("High", "high", 6, checkedAt),
+    ],
+  };
+  const criteria = {
+    ...defaultSearchCriteria(), schoolMinRating: 5, schoolAtLeastOneRating: 8, schoolAssignmentRequired: true,
+  };
+  assert.equal(assessProperty(property, criteria).overall, "verified");
+  property.schools![1].rating = 7;
+  assert.equal(assessProperty(property, criteria).overall, "failed");
+  property.schools![0].rating = 4;
+  property.schools![1].rating = 9;
+  assert.equal(assessProperty(property, criteria).overall, "failed");
+});
+
+test("accepts any qualifying school in a non-unique official placement pool", () => {
+  const checkedAt = new Date().toISOString();
+  const option = (name: string, rating: number) => ({
+    ...assignedSchool(name, "elementary" as const, rating, checkedAt),
+    relationship: "assignment-option" as const,
+    assignmentGroup: "Elementary C",
+    assignmentGroupSize: 3,
+  });
+  const property: Property = {
+    id: "school-options", title: "Athens home", price: 400000, bedrooms: 3, bathrooms: 2, sqft: 1800,
+    location: "Athens, GA", features: [], url: "", listedAt: checkedAt, source: "test",
+    schools: [
+      option("Possible Elementary A", 4), option("Possible Elementary B", 8), option("Possible Elementary C", 3),
+      assignedSchool("Middle", "middle", 6, checkedAt),
+      assignedSchool("High", "high", 5, checkedAt),
+    ],
+  };
+  const criteria = {
+    ...defaultSearchCriteria(), schoolMinRating: 5, schoolAtLeastOneRating: 8,
+    schoolAssignmentRequired: true, schoolAlternativePolicy: "any-eligible-option" as const,
+  };
+
+  const match = assessProperty(property, criteria);
+  assert.equal(match.overall, "verified");
+  assert.match(match.checks[0].detail, /official option meets/i);
+
+  property.schools![1].rating = 4;
+  assert.equal(assessProperty(property, criteria).overall, "failed");
+});
+
+test("extracts the user's flexible official-school option policy", () => {
+  const result = regexExtract("If assignment depends on availability, any one possible school at least 8 is acceptable", {
+    ...defaultSearchCriteria(), schoolMinRating: 5, schoolAtLeastOneRating: 8,
+  });
+  assert.equal(result.criteria.schoolAlternativePolicy, "any-eligible-option");
+});
+
+test("verifies complete nearby K-12 rating evidence but does not claim assignment", () => {
+  const checkedAt = new Date().toISOString();
+  const property: Property = {
+    id: "school-1", title: "Athens home", price: 400000, bedrooms: 3, bathrooms: 2, sqft: 1800,
+    location: "Athens, GA", features: [], url: "https://www.realtor.com/example", listedAt: checkedAt, source: "test",
+    schools: [
+      { name: "A Elementary School", rating: 8, scale: 10, type: "elementary", ratingSource: "GreatSchools", evidenceSource: "realtor-listing", sourceUrl: "https://www.realtor.com/example", relationship: "nearby", checkedAt },
+      { name: "B Middle School", rating: 9, scale: 10, type: "middle", ratingSource: "GreatSchools", evidenceSource: "realtor-listing", sourceUrl: "https://www.realtor.com/example", relationship: "nearby", checkedAt },
+      { name: "C High School", rating: 8, scale: 10, type: "high", ratingSource: "GreatSchools", evidenceSource: "realtor-listing", sourceUrl: "https://www.realtor.com/example", relationship: "nearby", checkedAt },
+    ],
+  };
+  const match = assessProperty(property, { ...defaultSearchCriteria(), schoolMinRating: 8 });
+  assert.equal(match.overall, "verified");
+  assert.match(match.checks[0].detail, /attendance assignment is not verified/i);
+});
+
+test("fails the school criterion when a Realtor-listed school is below the threshold", () => {
+  const checkedAt = new Date().toISOString();
+  const property: Property = {
+    id: "school-2", title: "Athens home", price: 400000, bedrooms: 3, bathrooms: 2, sqft: 1800,
+    location: "Athens, GA", features: [], url: "https://www.realtor.com/example", listedAt: checkedAt, source: "test",
+    schools: [{ name: "D High School", rating: 6, scale: 10, type: "high", ratingSource: "GreatSchools", evidenceSource: "firecrawl-search", sourceUrl: "https://www.realtor.com/school", relationship: "nearby", checkedAt }],
+  };
+  assert.equal(assessProperty(property, { ...defaultSearchCriteria(), schoolMinRating: 8 }).overall, "failed");
+});
+
+test("property-page school evidence satisfies the requested school rule nationwide", () => {
+  const checkedAt = new Date().toISOString();
+  const property: Property = {
+    id: "school-3", title: "Athens home", price: 400000, bedrooms: 3, bathrooms: 2, sqft: 1800,
+    location: "Athens, GA", features: [], url: "", listedAt: checkedAt, source: "test",
+    schools: [
+      { name: "A Elementary School", rating: 9, scale: 10, type: "elementary", ratingSource: "GreatSchools", evidenceSource: "realtor-listing", sourceUrl: "https://www.realtor.com/example", relationship: "listing-associated", assignmentSource: "realtor-listing", checkedAt },
+      { name: "B Middle School", rating: 9, scale: 10, type: "middle", ratingSource: "GreatSchools", evidenceSource: "realtor-listing", sourceUrl: "https://www.realtor.com/example", relationship: "listing-associated", assignmentSource: "realtor-listing", checkedAt },
+      { name: "C High School", rating: 9, scale: 10, type: "high", ratingSource: "GreatSchools", evidenceSource: "realtor-listing", sourceUrl: "https://www.realtor.com/example", relationship: "listing-associated", assignmentSource: "realtor-listing", checkedAt },
+    ],
+  };
+  const match = assessProperty(property, { ...defaultSearchCriteria(), schoolMinRating: 8, schoolAssignmentRequired: true });
+  assert.equal(match.overall, "verified");
+  assert.match(match.checks[0].detail, /displayed for this property on its Realtor page/i);
+});
+
+test("an unrelated nearby-school search does not satisfy a property-associated school request", () => {
+  const checkedAt = new Date().toISOString();
+  const property: Property = {
+    id: "school-4", title: "Athens home", price: 400000, bedrooms: 3, bathrooms: 2, sqft: 1800,
+    location: "Athens, GA", features: [], url: "", listedAt: checkedAt, source: "test",
+    schools: [
+      { name: "A Elementary School", rating: 9, scale: 10, type: "elementary", ratingSource: "GreatSchools", evidenceSource: "firecrawl-search", sourceUrl: "", relationship: "nearby", checkedAt },
+      { name: "B Middle School", rating: 9, scale: 10, type: "middle", ratingSource: "GreatSchools", evidenceSource: "firecrawl-search", sourceUrl: "", relationship: "nearby", checkedAt },
+      { name: "C High School", rating: 9, scale: 10, type: "high", ratingSource: "GreatSchools", evidenceSource: "firecrawl-search", sourceUrl: "", relationship: "nearby", checkedAt },
+    ],
+  };
+  const match = assessProperty(property, { ...defaultSearchCriteria(), schoolMinRating: 8, schoolAssignmentRequired: true });
+  assert.equal(match.overall, "unknown");
+});
+
+function assignedSchool(name: string, type: "elementary" | "middle" | "high", rating: number, checkedAt: string) {
+  return {
+    name, rating, scale: 10 as const, type, ratingSource: "GreatSchools" as const,
+    evidenceSource: "greatschools-page" as const, sourceUrl: "https://www.greatschools.org/example",
+    relationship: "assigned" as const, assignmentSource: "official-locator" as const,
+    assignmentSourceUrl: "https://district.example/locator", checkedAt,
+  };
+}

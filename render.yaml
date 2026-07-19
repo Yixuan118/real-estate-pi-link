@@ -1,6 +1,42 @@
-﻿services:
+services:
   - type: web
-    name: real-estate-backend
-    env: node
-    buildCommand: cd backend && npm install
-    startCommand: cd backend && npx tsx src/index.ts
+    name: real-estate-pi
+    runtime: node
+    plan: free
+    buildCommand: cd backend && npm ci && npm run build
+    startCommand: cd backend && npm start
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: NODE_VERSION
+        value: "20"
+      - key: PI_RUNTIME_ENABLED
+        value: "true"
+      - key: RE_MAP_PROVIDER
+        value: here
+      - key: RE_GEO_DISTANCE_MODE
+        value: DRIVE
+      - key: RE_DETAIL_ENRICH_LIMIT
+        value: "20"
+      - key: RE_FEATURE_SEARCH_LIMIT
+        value: "20"
+      - key: RE_SCHOOL_ENRICH_LIMIT
+        value: "20"
+      - key: RE_SCHOOL_RESULT_LIMIT
+        value: "20"
+      - key: RE_REALTOR_SCHOOL_DETAIL_ENABLED
+        value: "true"
+      - key: RE_GEO_ENRICH_LIMIT
+        value: "20"
+      - key: RE_CCSD_FIRECRAWL_FALLBACK
+        value: "false"
+      - key: RE_INTERACT_FALLBACK_ENABLED
+        value: "false"
+      - key: RE_INTERACT_FALLBACK_LIMIT
+        value: "3"
+      - key: DEEPSEEK_API_KEY
+        sync: false
+      - key: FIRECRAWL_API_KEY
+        sync: false
+      - key: HERE_API_KEY
+        sync: false

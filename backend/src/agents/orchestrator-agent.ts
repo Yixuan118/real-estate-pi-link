@@ -1,10 +1,10 @@
 ﻿
 import { SearchCriteria, Property, ConversationEntry, UserSession } from "../core/types";
 import { MemoryAgent, createMemorySession } from "./memory-agent";
-import { scraperAgent } from "./scraper-agent";
 import { watcherAgent } from "./watcher-agent";
 import * as store from "../core/store";
 import { piRuntimeService } from "../runtime/pi-runtime-service";
+import { buildComplexSearchReport } from "../core/complex-search-report";
 
 // 鈹€鈹€鈹€ Orchestrator Agent 鈹€鈹€鈹€
 // Inspired by pi-collaborating-agents' main orchestrator pattern.
@@ -35,9 +35,7 @@ export class OrchestratorAgent {
     this.sessionId = session.id;
     this.memoryAgent = agent;
 
-    // Register scraper skill availability
-    store.registerAgent("scraper", "scraper", process.pid);
-    this.emitActivity("Orchestrator", "ready", "Memory Agent ready, Scraper Agent available");
+    this.emitActivity("Orchestrator", "ready", "Memory Agent and Pi collaborating agents ready");
 
     this._initialized = true;
     return session;
@@ -56,8 +54,6 @@ export class OrchestratorAgent {
 
     store.registerAgent("orchestrator", "orchestrator", process.pid);
     store.registerAgent("memory", "memory", process.pid);
-    store.registerAgent("scraper", "scraper", process.pid);
-
     this.emitActivity("Orchestrator", "resume", `Resumed session for ${session.userId}`);
     return session;
   }
@@ -65,9 +61,9 @@ export class OrchestratorAgent {
   /**
    * Handle a user message end-to-end:
    * 1. MemoryAgent extracts criteria from natural language
-   * 2. ScraperAgent searches for matching properties
-   * 3. WatcherAgent starts background monitoring
-   * 4. Returns results with activity log
+   * 2. PiRuntime performs integrated listing research and collaboration
+   * 3. WatcherAgent optionally starts background monitoring
+   * 4. Returns evidence-ranked results with activity log
    */
   async handleUserMessage(userMessage: string): Promise<{
     response: string;
@@ -76,14 +72,7 @@ export class OrchestratorAgent {
     conversation: ConversationEntry[];
     activityLog: Array<{ agent: string; action: string; detail: string }>;
   }> {
-    let collaborativeMode: string | false = false;
-    let cleanMessage = userMessage.trim();
-    const lower = cleanMessage.toLowerCase();
-
-    if (lower.startsWith("/collab-agent-scrape")) {
-      collaborativeMode = "agent-scrape";
-      cleanMessage = cleanMessage.replace(/^\/collab-agent-scrape\s*/i, "");
-    }
+    const cleanMessage = userMessage.trim().replace(/^\/(?:collab-agent-scrape|collab-full|collab)\s*/i, "");
 
     const activityLog: Array<{ agent: string; action: string; detail: string }> = [];
     const logActivity = (agent: string, action: string, detail: string) => {
@@ -91,7 +80,7 @@ export class OrchestratorAgent {
       this.emitActivity(agent, action, detail);
     };
 
-    logActivity("OrchestratorAgent", "mode", "resolved: " + (collaborativeMode || "normal"));
+    logActivity("OrchestratorAgent", "mode", "Pi collaborating agents");
 
     if (!this.memoryAgent) {
       throw new Error("Orchestrator not initialized. Call initialize() first.");
@@ -112,31 +101,20 @@ export class OrchestratorAgent {
 
     logActivity("MemoryAgent", "done", "updated preferences: " + JSON.stringify(updatedCriteria));
 
-    // Step 2: Scraper Agent searches for matching properties (skip for agent-scrape - PiRuntime handles scraping + analysis)
-    let properties: Property[] = [];
-    let sourceLabel = "realtor.com (via Firecrawl)";
-    if (collaborativeMode !== "agent-scrape") {
-      logActivity("ScraperAgent", "busy", "searching matching properties...");
-      const result = await scraperAgent.search(updatedCriteria, (progress) => {
-        logActivity("ScraperAgent", "progress", progress);
-      });
-      properties = result.properties;
-      sourceLabel = result.totalCount > 0 ? result.properties[0]?.source || "realtor.com" : "none";
-      logActivity("ScraperAgent", "done", "found " + properties.length + " matching properties");
-    } else {
-      logActivity("ScraperAgent", "skipped", "agent-scrape mode: PiRuntime will scrape + analyze together");
-    }
-
-    // Step 3: Store matched properties
-    for (const prop of properties) {
-      store.saveMatchedProperty(this.sessionId, prop);
-    }
+    // PiRuntime owns both listing research and collaborative analysis. There is
+    // intentionally no standalone/basic scraper path.
+    const properties: Property[] = [];
+    logActivity("PiRuntime", "research", "Researching listings and coordinating evidence analysis...");
 
     let finalResponse = response;
     let finalProperties = properties;
+    let collaborativeDataError = "";
 
-    // Step 4: Collaborative mode -- call Pi collaborating agents for validation/ranking/summary
-    if (collaborativeMode) {
+    const hasComplexCriteria = Boolean(updatedCriteria.mustHave?.length || updatedCriteria.exteriorMaterials?.length
+      || updatedCriteria.communityFeatures?.length || updatedCriteria.distanceConstraints?.length
+      || updatedCriteria.highwayAccess || updatedCriteria.schoolMinRating != null || updatedCriteria.schoolAtLeastOneRating != null);
+    // Step 4: Pi collaborating agents validate, rank, and summarize.
+    {
       try {
         logActivity("PiRuntime", "busy", "Calling Pi collaborating agents for collaborative analysis...");
 
@@ -144,7 +122,6 @@ export class OrchestratorAgent {
           userMessage: cleanMessage,
           criteria: updatedCriteria,
           properties,
-          mode: collaborativeMode || undefined,
         });
 
         for (const item of piResult.agent_activity) {
@@ -163,6 +140,7 @@ export class OrchestratorAgent {
         }
 
         finalResponse = piResult.assistant_message;
+        collaborativeDataError = piResult.data_error || "";
 
         if (piResult.warnings.length > 0) {
           logActivity("PiRuntime", "warnings", piResult.warnings.join("; "));
@@ -171,6 +149,11 @@ export class OrchestratorAgent {
         // For agent-scrape mode: use properties scraped by PiRuntime internally
         if (piResult.properties && piResult.properties.length > 0) {
           finalProperties = piResult.properties;
+          if (piResult.ranked_property_ids.length > 0) {
+            const rank = new Map(piResult.ranked_property_ids.map((id, index) => [id, index]));
+            finalProperties = [...finalProperties].sort((a, b) =>
+              (rank.get(a.id) ?? Number.MAX_SAFE_INTEGER) - (rank.get(b.id) ?? Number.MAX_SAFE_INTEGER));
+          }
           logActivity("PiRuntime", "properties", "received " + finalProperties.length + " scraped properties");
           // Save to store for frontend display
           for (const prop of finalProperties) {
@@ -180,33 +163,26 @@ export class OrchestratorAgent {
 
         logActivity("PiRuntime", "done", "Pi collaborating agents analysis complete");
       } catch (err) {
-        logActivity(
-          "PiRuntime",
-          "fallback",
-          "Pi collaboration failed, falling back to normal results: " +
-            (err instanceof Error ? err.message : String(err)),
-        );
-        // For agent-scrape mode: fall back to enhanced scraper when PiRuntime is unavailable
-        if (collaborativeMode === "agent-scrape") {
-          try {
-            logActivity("ScraperAgent", "busy", "fallback: scraping enhanced data...");
-            const fb = await scraperAgent.search(updatedCriteria, (p) => {
-              logActivity("ScraperAgent", "progress", p);
-            });
-            if (fb.properties.length > 0) {
-              finalProperties = fb.properties;
-              for (const prop of finalProperties) store.saveMatchedProperty(this.sessionId, prop);
-              logActivity("ScraperAgent", "done", "fallback found " + finalProperties.length + " properties");
-            }
-          } catch (sb) {
-            logActivity("ScraperAgent", "error", "fallback scrape failed: " + (sb instanceof Error ? sb.message : String(sb)));
-          }
-        }
+        const detail = err instanceof Error ? err.message : String(err);
+        collaborativeDataError = detail;
+        finalProperties = [];
+        finalResponse = `Pi collaborating agents could not complete this search: ${detail}`;
+        logActivity("PiRuntime", "error", finalResponse);
       }
     }
 
-    // Step 5: Start watcher (if location is set)
-    if (updatedCriteria.location && !watcherAgent.isMonitoring(this.sessionId)) {
+    if (hasComplexCriteria && !collaborativeDataError) {
+      finalResponse = buildComplexSearchReport(updatedCriteria, finalProperties);
+      const diagnostics = finalProperties.flatMap((property) => (property.evidenceDiagnostics || [])
+        .filter((item) => item.status !== "success")
+        .map((item) => `${property.id}/${item.stage}: ${item.detail}`));
+      if (diagnostics.length > 0) logActivity("EvidenceValidator", "warnings", diagnostics.slice(0, 10).join("; "));
+    }
+
+    // Monitoring is opt-in because every interval performs an external listing
+    // request. Automatically starting one timer per chat caused silent credit use.
+    const watcherEnabled = /^(?:1|true|yes)$/i.test(process.env.RE_WATCHER_ENABLED || "");
+    if (watcherEnabled && updatedCriteria.location && !watcherAgent.isMonitoring(this.sessionId)) {
       logActivity("WatcherAgent", "start", "starting background monitoring...");
       watcherAgent.startMonitoring(
         this.sessionId,
@@ -216,6 +192,8 @@ export class OrchestratorAgent {
         },
       );
       logActivity("WatcherAgent", "active", "background monitoring activated");
+    } else if (!watcherEnabled && updatedCriteria.location) {
+      logActivity("WatcherAgent", "disabled", "background monitoring is opt-in and disabled to control API cost");
     }
 
     return {
@@ -254,7 +232,6 @@ export class OrchestratorAgent {
    */
   shutdown(): void {
     store.unregisterAgent("orchestrator");
-    store.unregisterAgent("scraper");
     store.unregisterAgent("memory");
     this.activityListeners = [];
     this.memoryAgent = null;

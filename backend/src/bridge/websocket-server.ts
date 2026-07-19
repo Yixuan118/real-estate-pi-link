@@ -9,7 +9,7 @@ import { WsClientMessage, WsServerEvent } from "../core/types";
 interface ClientState {
   socket: Socket;
   orchestrator: OrchestratorAgent;
-  yserId: string;
+  userId: string;
   sessionId: string | null;
 }
 
@@ -22,10 +22,16 @@ export class WebSocketBridge {
   constructor(port: number = 3742) {
     this.port = port;
     this.httpServer = createServer((req, res) => {
+      if (req.url?.split("?")[0] === "/health") {
+        res.writeHead(200, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
+        res.end(JSON.stringify({ status: "ok", service: "real-estate-pi", timestamp: new Date().toISOString() }));
+        return;
+      }
       const frontendDir = path.resolve(process.cwd(), "../frontend");
-      let filePath = req.url === "/" ? "/index.html" : req.url;
-      const fullPath = path.join(frontendDir, filePath);
-      if (!fullPath.startsWith(frontendDir)) {
+      const requestPath = decodeURIComponent((req.url || "/").split("?")[0]);
+      const filePath = requestPath === "/" ? "index.html" : requestPath.replace(/^\/+/, "");
+      const fullPath = path.resolve(frontendDir, filePath);
+      if (fullPath !== frontendDir && !fullPath.startsWith(frontendDir + path.sep)) {
         res.writeHead(403);
         res.end("Forbidden");
         return;
@@ -37,7 +43,7 @@ export class WebSocketBridge {
           return;
         }
         const ext = path.extname(fullPath);
-        const mime = {
+        const mime: Record<string, string> = {
           ".html": "text/html; charset=utf-8",
           ".js": "application/javascript; charset=utf-8",
           ".css": "text/css; charset=utf-8",
@@ -45,7 +51,10 @@ export class WebSocketBridge {
           ".jpg": "image/jpeg",
           ".svg": "image/svg+xml",
         };
-        res.writeHead(200, { "Content-Type": mime[ext] || "application/octet-stream" });
+        res.writeHead(200, {
+          "Content-Type": mime[ext] || "application/octet-stream",
+          "Cache-Control": ext === ".html" ? "no-cache" : "public, max-age=3600",
+        });
         res.end(data);
       });
     });
@@ -70,7 +79,8 @@ export class WebSocketBridge {
       this.clients.set(clientId, { socket, orchestrator, userId, sessionId: null });
       try {
         const session = await orchestrator.initialize(userId);
-        this.clients.get(clientId).sessionId = session.id;
+        const client = this.clients.get(clientId);
+        if (client) client.sessionId = session.id;
         socket.emit("server_event", { type: "agent_message", payload: { agentName: "Orchestrator", text: "Hi! I'm your real estate assistant.", timestamp: new Date().toISOString() } });
       } catch (err) {
         console.error("[Bridge] Failed to init: " + clientId, err);

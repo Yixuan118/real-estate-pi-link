@@ -1,0 +1,8 @@
+.git
+.real-estate-store
+backend/node_modules
+backend/dist
+backend/*-stdout.txt
+backend/*-stderr.txt
+*.log
+.env

@@ -1,5 +1,7 @@
 ﻿node_modules/
+backend/dist/
 .real-estate-store/
+.real-estate-store-test-*/
 outputs/
 *.py
 *.zip

@@ -1,14 +1,44 @@
 ﻿import { SearchCriteria, Property } from "../core/types";
 
+import { assessProperty, extractCoreListingMetrics, extractPropertyEvidence } from "../core/property-matcher";
+import * as store from "../core/store";
+import type { UserSession } from "../core/types";
+import { geoValidationService } from "../services/geo-validation-service";
+import { schoolRatingService } from "../services/school-rating-service";
+import { officialSchoolAssignmentService } from "../services/official-school-assignment-service";
+import { listingEvidenceSearchService } from "../services/listing-evidence-search-service";
+import { firecrawlRequestBudget } from "../services/firecrawl-request-budget";
+import { defaultCacheFile, PersistentJsonCache } from "../services/persistent-json-cache";
+import { readEnvironmentSecret } from "../services/environment-secret";
+import { waterbodyService } from "../services/waterbody-service";
+
 export class FirecrawlSkill {
   private apiKey: string;
-  private maxResults: number = 100;
+  private readonly listingCache: PersistentJsonCache<Property[]>;
+  private readonly listingFetch: typeof fetch;
+  // Keep scraping, enrichment, Pi analysis, and UI output on the same bounded set.
+  // Several evidence providers are intentionally capped at 20 requests per search.
+  private readonly maxResults = 20;
 
-  constructor() {
-    this.apiKey = process.env.FIRECRAWL_API_KEY ;
+  constructor(listingFetch: typeof fetch = fetch, apiKey = readEnvironmentSecret("FIRECRAWL_API_KEY")) {
+    this.apiKey = apiKey;
+    this.listingFetch = listingFetch;
+    this.listingCache = new PersistentJsonCache<Property[]>(defaultCacheFile("realtor-market-listings.json"));
   }
 
   async searchProperties(criteria: SearchCriteria): Promise<{ properties: Property[]; source: string; totalCount: number; error?: string }> {
+    const configuredBudget = resolveFirecrawlBudget(criteria);
+    return firecrawlRequestBudget.run(async () => {
+      try {
+        return await this.searchPropertiesWithinBudget(criteria);
+      } finally {
+        const budget = firecrawlRequestBudget.snapshot();
+        if (budget) console.log(`[FirecrawlBudget] credits ${budget.used}/${budget.limit}, HTTP requests ${budget.requests}: ${budget.labels.join(", ")}`);
+      }
+    }, configuredBudget);
+  }
+
+  private async searchPropertiesWithinBudget(criteria: SearchCriteria): Promise<{ properties: Property[]; source: string; totalCount: number; error?: string }> {
     console.log("[FirecrawlSkill] Search:", JSON.stringify(criteria));
     if (!criteria.location) return { properties: [], source: "none", totalCount: 0, error: "Please specify a location" };
 
@@ -22,24 +52,18 @@ export class FirecrawlSkill {
         }
         if (criteria.minPrice != null && p.price < criteria.minPrice) return false;
         if (criteria.maxPrice != null && p.price > criteria.maxPrice) return false;
-        if (criteria.minBedrooms != null && p.bedrooms < criteria.minBedrooms) return false;
-        if (criteria.minBathrooms != null && p.bathrooms < criteria.minBathrooms) return false;
-        if (criteria.mustHave && criteria.mustHave.length > 0) {
-          const tl = p.title.toLowerCase(), ll = p.location.toLowerCase(), fl = (p.features||[]).map((f: any) => f.toLowerCase());
-          for (const kw of criteria.mustHave) {
-            const kl = kw.toLowerCase();
-            if (!fl.some((f: any) => f.includes(kl)) && !tl.includes(kl) && !ll.includes(kl)) {
-              if (!(p.features && p.features.length > 0) && content && content.toLowerCase().includes(kl)) continue;
-              return false;
-            }
-          }
-        }
+        // Zero is the legacy sentinel for "not extracted", not evidence that a
+        // listing has zero rooms. Keep unknowns until detail enrichment/assessment.
+        if (criteria.minBedrooms != null && p.bedrooms > 0 && p.bedrooms < criteria.minBedrooms) return false;
+        if (criteria.minBathrooms != null && p.bathrooms > 0 && p.bathrooms < criteria.minBathrooms) return false;
+        // Do not reject feature requirements from search cards. Many Realtor
+        // facts only appear on the detail page and are evaluated after enrichment.
         return true;
       });
     };
 
     try {
-      const loc = this.parseLocation(criteria.location);
+      const loc = await this.parseLocation(criteria.location);
       let targetUrl = "https://www.realtor.com/realestateandhomes-search/" + loc.citySlug + "_" + loc.stateCode;
 
       const page = (criteria as any).page || 1;
@@ -47,72 +71,33 @@ export class FirecrawlSkill {
         targetUrl += `/pg-${page}`;
       }
 
+      // Version the cache whenever core metric normalization changes.
+      const cacheKey = `v4:${targetUrl.toLowerCase()}`;
+      const cachedMarket = this.listingCache.get(cacheKey);
+      if (cachedMarket?.length) {
+        const warning = "Using recently cached real Realtor listings to avoid another listing-page scrape; results are not guaranteed to be current.";
+        const cached = applyFilters(cachedMarket.map(repairCachedCoreMetrics))
+          .map((property) => addDiagnostic(property, "listing-search", "warning", warning));
+        const matched = await this.finalizeComplexMatches(cached, criteria);
+        return { properties: matched, source: "Realtor.com (recent live cache)", totalCount: matched.length, error: warning };
+      }
+
       console.log("[FirecrawlSkill] Fetching:", targetUrl);
 
-let data: any;
-
-try {
-    const controller = new AbortController();
-
-    // 超时时间改成120秒
-    const timeout = setTimeout(() => {
-        controller.abort();
-    }, 120000);
-
-    const res = await fetch("https://api.firecrawl.dev/v1/scrape", {
-        method: "POST",
-        headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${this.apiKey}`,
-        },
-        body: JSON.stringify({
-            url: targetUrl,
-
-            // 两种格式即可
-            formats: ["rawHtml", "markdown"],
-
-            // 页面等待时间
-            waitFor: 5000,
-        }),
-        signal: controller.signal,
-    });
-
-    clearTimeout(timeout);
-
-    console.log("[FirecrawlSkill] HTTP Status:", res.status);
-
-    if (!res.ok) {
-        const text = await res.text();
-        console.error("[FirecrawlSkill] HTTP Error:");
-        console.error(text);
-
-        throw new Error(`Firecrawl HTTP ${res.status}`);
-    }
-
-    data = await res.json();
-
-    console.log(
-        "[FirecrawlSkill] success:",
-        data.success,
-        "hasData:",
-        !!data.data
-    );
-
-} catch (err: any) {
-    console.error("[FirecrawlSkill] Request Failed");
-    console.error(err);
-
-    throw err;
-}
+      const data = await this.scrapeListingPage(targetUrl);
 
       if (data.success && data.data) {
         const raw = data.data.rawHtml || "";
         if (raw.length > 1000) {const md = data.data.markdown || data.data.content || "";
           console.log("[FirecrawlSkill] Got rawHtml:", raw.length, "chars");
-          const fromHtml = this.parsePropertiesFromHtml(raw, criteria, md);
+          let fromHtml = this.parsePropertiesFromHtml(raw, criteria, md);
           if (fromHtml.length > 0) {
+            if (page === 1) fromHtml = await this.supplementListingPages(targetUrl, fromHtml, criteria, applyFilters);
             console.log("[FirecrawlSkill] Extracted", fromHtml.length, "properties from JSON-LD");
-            const filteredHtml = applyFilters(fromHtml, raw); return { properties: filteredHtml, source: "realtor.com (via Firecrawl)", totalCount: filteredHtml.length };
+            this.cacheLiveListings(cacheKey, fromHtml);
+            const filteredHtml = applyFilters(fromHtml, raw);
+            const matchedHtml = await this.finalizeComplexMatches(filteredHtml, criteria);
+            return { properties: matchedHtml, source: "realtor.com (via Firecrawl)", totalCount: matchedHtml.length };
           }
           console.log("[FirecrawlSkill] JSON-LD yielded 0, trying markdown...");
         }
@@ -122,7 +107,9 @@ try {
           const fromMd = this.parseContent(md, criteria);
           if (fromMd.length > 0) {
             console.log("[FirecrawlSkill] Parsed", fromMd.length, "properties from markdown");
-            return { properties: fromMd, source: "realtor.com (via Firecrawl)", totalCount: fromMd.length };
+            this.cacheLiveListings(cacheKey, fromMd);
+            const matchedMarkdown = await this.finalizeComplexMatches(applyFilters(fromMd, md), criteria);
+            return { properties: matchedMarkdown, source: "realtor.com (via Firecrawl)", totalCount: matchedMarkdown.length };
           }
           console.log("[FirecrawlSkill] Markdown parser returned 0");
         }
@@ -137,34 +124,461 @@ try {
         console.error("Firecrawl Timeout (>120s)");
     }
 
-    console.log("[FirecrawlSkill] Using demo database for", criteria.location);
-
-    const results = this.demoSearch(criteria);
-
-    return {
-        properties: results,
-        source: "demo-database",
-        totalCount: results.length,
-        error: err.message,
-    };
+    const message = err instanceof Error ? err.message : String(err);
+    const cached = this.loadPriorLiveListings(criteria.location);
+    if (cached.length) {
+      const warning = `Live Realtor scrape failed (${message}); using previously captured real Realtor listings. Results are not live and may include sold or changed listings.`;
+      const candidates = applyFilters(cached)
+        .map((property) => addDiagnostic(property, "listing-search", "warning", warning));
+      const results = await this.finalizeComplexMatches(candidates, criteria);
+      return { properties: results, source: "Realtor.com (cached prior live results)", totalCount: results.length, error: warning };
+    }
+    if (/^(?:1|true|yes)$/i.test(process.env.RE_ALLOW_DEMO_FALLBACK || "")) {
+      console.warn("[FirecrawlSkill] Explicit demo fallback enabled for", criteria.location);
+      const results = await this.finalizeComplexMatches(this.demoSearch(criteria), criteria, false);
+      return { properties: results, source: "demo-database", totalCount: results.length, error: message };
+    }
+    console.error("[FirecrawlSkill] Live scrape failed; demo fallback is disabled.");
+    return { properties: [], source: "firecrawl-error", totalCount: 0, error: message };
 }
 
-    console.log("[FirecrawlSkill] Using demo database for", criteria.location);
-    const results = this.demoSearch(criteria);
-    return { properties: results, source: "demo-database", totalCount: results.length };
+    const message = "Firecrawl returned no parseable live Realtor listings.";
+    const cached = this.loadPriorLiveListings(criteria.location);
+    if (cached.length) {
+      const warning = `${message} Using previously captured real Realtor listings; results are not live.`;
+      const candidates = applyFilters(cached)
+        .map((property) => addDiagnostic(property, "listing-search", "warning", warning));
+      const results = await this.finalizeComplexMatches(candidates, criteria);
+      return { properties: results, source: "Realtor.com (cached prior live results)", totalCount: results.length, error: warning };
+    }
+    if (/^(?:1|true|yes)$/i.test(process.env.RE_ALLOW_DEMO_FALLBACK || "")) {
+      const results = await this.finalizeComplexMatches(this.demoSearch(criteria), criteria, false);
+      return { properties: results, source: "demo-database", totalCount: results.length, error: message };
+    }
+    return { properties: [], source: "firecrawl-error", totalCount: 0, error: message };
+  }
+
+  private async scrapeListingPage(url: string): Promise<any> {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 120000);
+    try {
+      firecrawlRequestBudget.consume("listing search page");
+      const response = await this.listingFetch("https://api.firecrawl.dev/v1/scrape", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${this.apiKey}` },
+        body: JSON.stringify({ url, formats: ["rawHtml", "markdown"], waitFor: 5000 }),
+        signal: controller.signal,
+      });
+      console.log("[FirecrawlSkill] HTTP Status:", response.status);
+      if (!response.ok) throw new Error(`Firecrawl HTTP ${response.status}`);
+      const data: any = await response.json();
+      firecrawlRequestBudget.settle("listing search page", data.creditsUsed);
+      console.log("[FirecrawlSkill] success:", data.success, "hasData:", Boolean(data.data));
+      return data;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  private async supplementListingPages(
+    baseUrl: string,
+    initial: Property[],
+    criteria: SearchCriteria,
+    applyFilters: (properties: Property[]) => Property[],
+  ): Promise<Property[]> {
+    const target = Math.max(1, Math.min(Number(process.env.RE_MIN_RESULT_TARGET || 10), this.maxResults));
+    const pageLimit = Math.max(1, Math.min(Number(process.env.RE_LISTING_PAGE_LIMIT || 3), 5));
+    const merged = new Map<string, Property>();
+    const add = (property: Property) => {
+      const key = normalizePropertyAddress(property);
+      if (!merged.has(key)) merged.set(key, property);
+    };
+    initial.forEach(add);
+    for (let page = 2; page <= pageLimit && applyFilters([...merged.values()]).length < target; page++) {
+      try {
+        const data = await this.scrapeListingPage(`${baseUrl}/pg-${page}`);
+        const raw = data?.data?.rawHtml || "";
+        const markdown = data?.data?.markdown || data?.data?.content || "";
+        if (raw.length < 1000) break;
+        const parsed = this.parsePropertiesFromHtml(raw, criteria, markdown);
+        if (!parsed.length) break;
+        parsed.forEach(add);
+      } catch (error) {
+        console.warn("[FirecrawlSkill] Additional listing page failed:", error instanceof Error ? error.message : String(error));
+        break;
+      }
+    }
+    return [...merged.values()].map((property, index) => ({ ...property, id: `r${index + 1}` }));
+  }
+
+  private cacheLiveListings(cacheKey: string, properties: Property[]): void {
+    const ttlMs = positiveNumber(process.env.RE_LISTING_CACHE_TTL_MS, 30 * 60 * 1000);
+    const candidateLimit = Math.max(this.maxResults, Math.min(Number(process.env.RE_LISTING_CACHE_CANDIDATE_LIMIT || 60), 100));
+    this.listingCache.set(cacheKey, properties.slice(0, candidateLimit).map(clearDerivedMatch), ttlMs);
+  }
+
+  private loadPriorLiveListings(location: string): Property[] {
+    const maxAgeMs = positiveNumber(process.env.RE_PRIOR_LISTING_MAX_AGE_MS, 7 * 24 * 60 * 60 * 1000);
+    const sessions = store.listSessions()
+      .map((id) => store.loadSession(id))
+      .filter((session): session is UserSession => Boolean(session));
+    return selectCachedLiveProperties(sessions, location, maxAgeMs, this.maxResults);
+  }
+
+  private hasComplexCriteria(criteria: SearchCriteria): boolean {
+    return Boolean(criteria.mustHave?.length || criteria.exteriorMaterials?.length || criteria.communityFeatures?.length
+      || criteria.distanceConstraints?.length || criteria.highwayAccess || criteria.schoolMinRating != null || criteria.schoolAtLeastOneRating != null);
+  }
+
+  private async finalizeComplexMatches(properties: Property[], criteria: SearchCriteria, enrich = true): Promise<Property[]> {
+    const hasSchoolCriteria = criteria.schoolMinRating != null || criteria.schoolAtLeastOneRating != null;
+    const resultLimit = this.maxResults;
+    let candidates = properties.slice(0, resultLimit).map(addCoreDataDiagnostic);
+    const needsListingDetail = requiresListingDetail(criteria);
+    // Realtor new-construction cards often report only full baths (for example,
+    // "2 bath") while the builder/MLS record says "2 full + 1 half". Verify
+    // only these high-risk cards, with a small independent cap and cache.
+    if (enrich && listingEvidenceSearchService.enabled && shouldVerifyBathroomsSeparately(criteria)) {
+      const limit = Math.max(0, Math.min(Number(process.env.RE_BATHROOM_VERIFY_LIMIT || 5), 10));
+      const indexes = candidates.map((property, index) => ({ property, index }))
+        .filter(({ property }) => property.fullBathrooms == null && property.halfBathrooms == null
+          && property.features.some((feature) => /new construction/i.test(feature)))
+        .slice(0, limit);
+      await mapWithConcurrency(indexes, 2, async ({ index }) => {
+        try {
+          const enriched = await listingEvidenceSearchService.enrichBathroomDetails(candidates[index]);
+          const verified = enriched.fullBathrooms != null && enriched.halfBathrooms != null;
+          candidates[index] = addDiagnostic(enriched, "listing-search", verified ? "success" : "warning", verified
+            ? `Bathroom breakdown verified: ${enriched.fullBathrooms} full and ${enriched.halfBathrooms} half (${enriched.bathrooms} total rooms).`
+            : "Exact-address sources did not provide a full/half bathroom breakdown; the Realtor summary count may omit half baths.");
+        } catch (error) {
+          candidates[index] = addDiagnostic(candidates[index], "listing-search", "warning",
+            `Bathroom breakdown verification failed: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      });
+    }
+    if (!this.hasComplexCriteria(criteria)) {
+      return rankAssessedProperties(candidates, criteria);
+    }
+    // Realtor detail pages are the cheapest shared source for requested listing
+    // features, nearby amenities, and source-backed school ratings. Official
+    // locators still provide attendance assignment proof below.
+    if (needsListingDetail && enrich && this.apiKey) {
+      const limit = Math.max(1, Math.min(Number(process.env.RE_DETAIL_ENRICH_LIMIT || 20), 20));
+      const concurrency = Math.max(1, Math.min(Number(process.env.RE_DETAIL_CONCURRENCY || 2), 4));
+      const defaultInteractLimit = hasSchoolCriteria ? 20 : 3;
+      const interactLimit = Math.max(0, Math.min(Number(process.env.RE_INTERACT_FALLBACK_LIMIT || defaultInteractLimit), 20));
+      let interactFallbacks = 0;
+      // Firecrawl permits several ordinary scrapes in parallel, but starting
+      // multiple browser-interaction sessions together is much more likely to
+      // be rate-limited. Keep only the interaction part sequential while the
+      // surrounding detail-page work retains its configured concurrency.
+      let interactionQueue: Promise<void> = Promise.resolve();
+      const runInteraction = <T>(operation: () => Promise<T>): Promise<T> => {
+        const queued = interactionQueue.then(operation, operation);
+        interactionQueue = queued.then(() => undefined, () => undefined);
+        return queued;
+      };
+      candidates = candidates.map((property, index) => index >= limit
+        ? addDiagnostic(property, "listing-detail", "warning", `Detail enrichment limit ${limit} reached.`)
+        : !property.url
+          ? addDiagnostic(property, "listing-detail", "warning", "Listing detail URL is missing; brick and community amenities cannot be verified.")
+          : property);
+      const indexes = candidates.slice(0, limit).map((_, index) => index).filter((index) => Boolean(candidates[index].url));
+      await mapWithConcurrency(indexes, concurrency, async (index) => {
+        const property = candidates[index];
+        try {
+          const url = property.url.startsWith("http") ? property.url : `https://www.realtor.com${property.url.startsWith("/") ? "" : "/"}${property.url}`;
+          // A Realtor page can exceed one million raw-HTML characters. For a
+          // school-only query the rendered markdown already contains the full
+          // Schools panel, so avoid requesting rawHtml and reduce 408/timeouts.
+          const schoolLight = isSchoolOnlyDetailRequest(criteria);
+          const detail = await this.scrapeDetail(url, schoolLight);
+          let detailContent = `${detail.markdown}\n${detail.rawHtml}`;
+          // Only resume an interactive session when the initial response is
+          // missing a requested dynamic panel. One session expands all useful
+          // school/community tabs so this is not a request per accordion.
+          const interactEnabled = /^(?:1|true|yes)$/i.test(process.env.RE_INTERACT_FALLBACK_ENABLED || "true");
+          // Realtor currently returns an empty 327-character page when a
+          // Firecrawl browser session resumes this URL. For school searches,
+          // use the server-rendered address-specific school links plus cached
+          // exact-school rating lookups instead of spending credits on a known
+          // empty interaction session.
+          if (interactEnabled && !hasSchoolCriteria && detail.scrapeId && interactFallbacks < interactLimit
+              && detailNeedsInteractiveExpansion(detailContent, criteria)) {
+            interactFallbacks += 1;
+            const expanded = await runInteraction(() => this.expandInteractiveDetail(detail.scrapeId!)).catch((error) => {
+              console.warn("[FirecrawlSkill] Interactive expansion failed for", property.id, error instanceof Error ? error.message : String(error));
+              return "";
+            });
+            if (hasSchoolCriteria) console.log(`[SchoolPanel] ${property.id}: interaction returned ${expanded.length} character(s)`);
+            if (expanded) detailContent = `${detailContent}\n${expanded}`;
+          }
+          const enriched = extractPropertyEvidence(property, detailContent);
+          if (hasSchoolCriteria) {
+            const ratedSchools = (enriched.schools || []).filter((school) => school.rating != null);
+            console.log(`[SchoolPanel] ${property.id}: ${(enriched.schools || []).length} associated school link(s), ${ratedSchools.length} inline rating(s), stages=${[...new Set((enriched.schools || []).map((school) => school.type))].join("/") || "none"}`);
+          }
+          const found = [
+            enriched.exteriorCoverage === "all-sides" ? "four-sided brick" : null,
+            enriched.communityFeatures?.length ? `community ${enriched.communityFeatures.join("/")}` : null,
+            enriched.schools?.some((school) => school.rating != null)
+              ? `${enriched.schools.filter((school) => school.rating != null).length} school ratings`
+              : enriched.schools?.length ? `${enriched.schools.length} property-associated school links` : null,
+          ].filter(Boolean);
+          candidates[index] = addDiagnostic(enriched, "listing-detail", "success",
+            found.length ? `Detail page evidence found: ${found.join(", ")}.` : "Detail page loaded, but no requested listing evidence was found.");
+        } catch (error) {
+          if (hasSchoolCriteria && !isSchoolOnlyDetailRequest(criteria)) {
+            try {
+              const url = property.url.startsWith("http") ? property.url : `https://www.realtor.com${property.url.startsWith("/") ? "" : "/"}${property.url}`;
+              const schoolDetail = await this.scrapeDetail(url, true);
+              const enriched = extractPropertyEvidence(property, schoolDetail.markdown);
+              const rated = (enriched.schools || []).filter((school) => school.rating != null).length;
+              candidates[index] = addDiagnostic(enriched, "listing-detail", rated ? "success" : "warning",
+                rated ? `Full detail request failed, but the lightweight Schools panel fallback found ${rated} rating(s).`
+                  : "Full detail request failed; the lightweight Schools panel fallback returned no ratings.");
+              return;
+            } catch (fallbackError) {
+              console.warn("[FirecrawlSkill] Lightweight school fallback failed for", property.id,
+                fallbackError instanceof Error ? fallbackError.message : String(fallbackError));
+            }
+          }
+          console.warn("[FirecrawlSkill] Detail enrichment failed for", property.id, error instanceof Error ? error.message : String(error));
+          candidates[index] = addDiagnostic(property, "listing-detail", "error", `Firecrawl detail request failed: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      });
+    } else if (needsListingDetail && !enrich) {
+      candidates = candidates.map((property) => addDiagnostic(property, "listing-detail", "warning",
+        "Detail-page evidence is unavailable for fallback/demo data."));
+    }
+
+    const needsFeatureEvidence = Boolean(criteria.exteriorMaterials?.length || criteria.communityFeatures?.length);
+    if (needsFeatureEvidence && enrich && listingEvidenceSearchService.enabled) {
+      const limit = Math.max(1, Math.min(Number(process.env.RE_FEATURE_SEARCH_LIMIT || 20), 20));
+      const concurrency = Math.max(1, Math.min(Number(process.env.RE_FEATURE_SEARCH_CONCURRENCY || 2), 4));
+      candidates = candidates.map((property, index) => index < limit ? property
+        : addDiagnostic(property, "listing-search", "warning", `Targeted feature search limit ${limit} reached.`));
+      const unresolvedIndexes = candidates.slice(0, limit).map((_, index) => index)
+        .filter((index) => needsTargetedFeatureSearch(candidates[index], criteria));
+      await mapWithConcurrency(unresolvedIndexes, concurrency, async (index) => {
+        const before = candidates[index].featureEvidence?.length || 0;
+        try {
+          const enriched = await listingEvidenceSearchService.enrichProperty(candidates[index], criteria);
+          const found = (enriched.featureEvidence || []).slice(before).map((item) => item.criterion);
+          candidates[index] = addDiagnostic(enriched, "listing-search", found.length ? "success" : "warning",
+            found.length
+              ? `Targeted exact-address evidence found: ${found.join(", ")}.`
+              : "Exact-address Realtor/Redfin/Homes search returned no explicit four-sided-brick or community-lake statement.");
+        } catch (error) {
+          candidates[index] = addDiagnostic(candidates[index], "listing-search", "error",
+            `Targeted listing evidence search failed: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      });
+    }
+
+    if ((criteria.schoolMinRating != null || criteria.schoolAtLeastOneRating != null) && enrich) {
+      const limit = Math.max(1, Math.min(Number(process.env.RE_SCHOOL_ENRICH_LIMIT || 20), 20));
+      const concurrency = Math.max(1, Math.min(Number(process.env.RE_SCHOOL_CONCURRENCY || 2), 4));
+      candidates = candidates.map((property, index) => index < limit ? property
+        : addDiagnostic(property, "school-rating", "warning", `School rating enrichment limit ${limit} reached.`));
+      await mapWithConcurrency(candidates.slice(0, limit).map((_, index) => index), concurrency, async (index) => {
+        let property = candidates[index];
+        if (hasCompleteRealtorSchoolEvidence(property)) {
+          candidates[index] = addDiagnostic(property, "school-assignment", "success",
+            "Reused complete elementary/middle/high school evidence displayed on the Realtor property page; official-locator fallback was not needed.");
+          return;
+        }
+        if (property.latitude == null || property.longitude == null) {
+          property = geoValidationService.enabled
+            ? await geoValidationService.ensureCoordinates(property)
+            : addDiagnostic(property, "school-assignment", "warning", "No HERE/Google geocoder is configured for official school assignment lookup.");
+        }
+        candidates[index] = await officialSchoolAssignmentService.enrichProperty(property);
+      });
+    }
+
+    if ((criteria.schoolMinRating != null || criteria.schoolAtLeastOneRating != null) && enrich && schoolRatingService.enabled) {
+      const limit = Math.max(1, Math.min(Number(process.env.RE_SCHOOL_ENRICH_LIMIT || 20), 20));
+      const concurrency = Math.max(1, Math.min(Number(process.env.RE_SCHOOL_CONCURRENCY || 2), 4));
+      await mapWithConcurrency(candidates.slice(0, limit).map((_, index) => index), concurrency, async (index) => {
+        try {
+          const enriched = await schoolRatingService.enrichProperty(candidates[index], criteria.location, {
+            strictAssignment: criteria.schoolAssignmentRequired === true,
+          });
+          const rated = (enriched.schools || []).filter((school) => school.rating != null);
+          const assignedRatings = rated.filter((school) => school.relationship === "assigned" || school.relationship === "assignment-option" || school.relationship === "listing-associated").length;
+          console.log(`[SchoolRatings] ${enriched.id}: ${rated.length} rated school(s), stages=${[...new Set(rated.map((school) => school.type))].join("/") || "none"}`);
+          candidates[index] = addDiagnostic(enriched, "school-rating", rated.length ? "success" : "warning",
+            rated.length
+              ? assignedRatings
+                ? `Using ${assignedRatings} source-backed rating(s) associated with this property by Realtor or an official locator.`
+                : `Found ${rated.length} source-backed Realtor/GreatSchools rating(s); schools are nearby, not verified attendance assignments.`
+              : "No source-backed K-12 rating was found through the listing or targeted Realtor search.");
+        } catch (error) {
+          candidates[index] = addDiagnostic(candidates[index], "school-rating", "error",
+            `Firecrawl school rating search failed: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      });
+    } else if ((criteria.schoolMinRating != null || criteria.schoolAtLeastOneRating != null) && !schoolRatingService.enabled) {
+      candidates = candidates.map((property) => addDiagnostic(property, "school-rating", "error",
+        "FIRECRAWL_API_KEY is not configured; school ratings cannot be verified."));
+    }
+    const hasWaterCriterion = Boolean(criteria.communityFeatures?.some((item) => /lake|pond/i.test(item)));
+    const hasMapCriteria = Boolean(criteria.distanceConstraints?.length || criteria.highwayAccess || hasWaterCriterion);
+    if (hasMapCriteria && geoValidationService.enabled) {
+      candidates = await geoValidationService.enrichProperties(candidates, criteria, (message) => {
+        console.log(`[GeoValidationService] ${message}`);
+      });
+    } else if (hasMapCriteria) {
+      candidates = candidates.map((property) => addDiagnostic(property, "geo-provider", "error",
+        "No map provider is configured. Set RE_MAP_PROVIDER=here and HERE_API_KEY."));
+    }
+    if (hasWaterCriterion) candidates = await waterbodyService.enrichProperties(candidates, criteria);
+
+    return rankAssessedProperties(candidates, criteria);
+  }
+
+  private async scrapeDetail(url: string, schoolLight = false): Promise<{ rawHtml: string; markdown: string; scrapeId?: string }> {
+    firecrawlRequestBudget.consume("listing detail page");
+    const response = await this.listingFetch("https://api.firecrawl.dev/v2/scrape", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${this.apiKey}` },
+      body: JSON.stringify({
+        url,
+        formats: schoolLight ? ["markdown"] : ["rawHtml", "markdown"],
+        onlyMainContent: false,
+        // Realtor's Schools panel is hydrated after the initial page shell.
+        // A cached scrape can permanently preserve the shell without those
+        // ratings, so school requests must wait for rendering and bypass the
+        // Firecrawl document cache. Ordinary detail requests remain cached.
+        waitFor: schoolLight ? 5000 : 0,
+        timeout: schoolLight ? 90000 : 60000,
+        maxAge: schoolLight ? 0 : 604800000,
+        proxy: "auto",
+        location: { country: "US", languages: ["en-US"] },
+      }),
+      signal: AbortSignal.timeout(schoolLight ? 105000 : 75000),
+    });
+    if (!response.ok) {
+      const errorBody = (await response.text()).replace(/\s+/g, " ").slice(0, 500);
+      throw new Error(`Firecrawl detail HTTP ${response.status}${errorBody ? `: ${errorBody}` : ""}`);
+    }
+    const payload: any = await response.json();
+    firecrawlRequestBudget.settle("listing detail page", payload.creditsUsed);
+    const detail = {
+      rawHtml: payload.data?.rawHtml || "", markdown: payload.data?.markdown || payload.data?.content || "",
+      scrapeId: payload.data?.metadata?.scrapeId || payload.data?.metadata?.scrape_id || payload.data?.scrapeId || payload.id,
+    };
+    if (!detail.rawHtml && !detail.markdown) throw new Error("Firecrawl detail returned empty content");
+    return detail;
+  }
+
+  private async expandInteractiveDetail(scrapeId: string): Promise<string> {
+    firecrawlRequestBudget.consume("interactive detail expansion");
+    const endpoint = `https://api.firecrawl.dev/v2/scrape/${encodeURIComponent(scrapeId)}/interact`;
+    try {
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        const response = await this.listingFetch(endpoint, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${this.apiKey}` },
+          body: JSON.stringify({
+            language: "node", timeout: 25, origin: "real-estate-pi-detail-expansion",
+          code: `
+            await page.evaluate(async () => {
+              // Realtor lazy-mounts deep sections. Scroll the full document in
+              // bounded steps before looking for the accordion heading.
+              window.scrollTo(0, 0);
+              for (let y = 0; y < document.documentElement.scrollHeight; y += 900) {
+                window.scrollTo(0, y);
+                await new Promise(resolve => setTimeout(resolve, 140));
+              }
+              window.scrollTo(0, document.documentElement.scrollHeight);
+              await new Promise(resolve => setTimeout(resolve, 500));
+              const all = Array.from(document.querySelectorAll('h1,h2,h3,h4,button,[role="button"],summary'));
+              const heading = all.find((element) => /Neighborhood\\s*&\\s*schools/i.test(element.textContent || ''));
+              if (heading) heading.scrollIntoView({ block: 'center' });
+            });
+            await page.waitForTimeout(800);
+            await page.evaluate(() => {
+              const relevant = /neighbou?rhood.*schools|nearby schools|show more/i;
+              const controls = Array.from(document.querySelectorAll('button,[role="button"],[role="tab"],summary'));
+              for (const control of controls) {
+                const label = (control.textContent || '').replace(/\\s+/g, ' ').trim();
+                if (relevant.test(label)) control.click();
+              }
+            });
+            await page.waitForTimeout(1000);
+            const schoolText = await page.evaluate(() => {
+              const text = document.body.innerText || '';
+              const starts = [
+                text.search(/Neighborhood\\s*&\\s*schools/i),
+                text.search(/Schools\\s*\\n\\s*From listing agent/i),
+                text.search(/Nearby schools\\s*\\n\\s*Elementary\\s*\\n\\s*Middle\\s*\\n\\s*High/i),
+              ].filter(index => index >= 0);
+              const start = starts.length ? Math.min(...starts) : -1;
+              if (start < 0) return text.slice(-40000);
+              const tail = text.slice(start);
+              const end = tail.search(/\\n(?:Environmental risk|Learn more about|Similar homes|Property history)\\b/i);
+              return end > 0 ? tail.slice(0, end) : tail.slice(0, 50000);
+            });
+            schoolText
+          `,
+          }),
+          signal: AbortSignal.timeout(35000),
+        });
+        if (response.status === 429 && attempt < 2) {
+          const retryAfterSeconds = Number(response.headers.get("retry-after"));
+          const delayMs = Number.isFinite(retryAfterSeconds)
+            ? Math.max(0, retryAfterSeconds * 1000)
+            : 1500 * (attempt + 1);
+          await delay(delayMs);
+          firecrawlRequestBudget.consume("interactive detail expansion retry");
+          continue;
+        }
+        if (!response.ok) throw new Error(`Firecrawl interact HTTP ${response.status}`);
+        const payload: any = await response.json();
+        firecrawlRequestBudget.settle("interactive detail expansion", payload.creditsUsed);
+        return extractInteractText(payload);
+      }
+      return "";
+    } finally {
+      await this.listingFetch(endpoint, {
+        method: "DELETE", headers: { Authorization: `Bearer ${this.apiKey}` }, signal: AbortSignal.timeout(10000),
+      }).catch(() => undefined);
+    }
   }
 
   async checkForNewProperties(criteria: SearchCriteria): Promise<Property[]> {
-    const result = await this.searchProperties(criteria);
+    // Monitoring only needs a fresh listing index. Full feature, map, and school
+    // enrichment is deferred until the user opens a new search.
+    const listingOnlyCriteria: SearchCriteria = {
+      ...criteria,
+      exteriorMaterials: undefined,
+      communityFeatures: undefined,
+      distanceConstraints: undefined,
+      highwayAccess: undefined,
+      schoolMinRating: undefined,
+      schoolAtLeastOneRating: undefined,
+      schoolAssignmentRequired: undefined,
+    };
+    const result = await this.searchProperties(listingOnlyCriteria);
     return result.properties;
   }
 
-  private parseLocation(location: string): { citySlug: string; stateCode: string } {
+  private async parseLocation(location: string): Promise<{ citySlug: string; stateCode: string }> {
     const cityToState = this.getCityToState();
     // Strip price/noise words before location matching
     let clean = location.toLowerCase().trim();
     clean = clean.replace(/\s+(priced|under|over|budget|max|min|million|thousand|k|dollars?)\b.*$/i, "").trim();
     const lower = clean;
+    // Explicit City, ST always wins over aliases. This prevents Portland, ME
+    // becoming Portland, OR and Athens, OH becoming Athens, GA.
+    const stateMatch = lower.match(/^(.+?),?\s+([a-z]{2})$/);
+    if (stateMatch && isUsStateCode(stateMatch[2])) {
+      const city = stateMatch[1].trim();
+      return { citySlug: slugifyCity(city), stateCode: stateMatch[2].toUpperCase() };
+    }
     if (lower.includes("atlanta")) return { citySlug: "atlanta", stateCode: "GA" }; if (lower.includes("seattle")) return { citySlug: "seattle", stateCode: "WA" };
     if (lower.includes("new york")) return { citySlug: "new-york", stateCode: "NY" };
     if (lower.includes("san francisco")) return { citySlug: "san-francisco", stateCode: "CA" };
@@ -182,17 +596,27 @@ try {
     if (lower.includes("detroit")) return { citySlug: "detroit", stateCode: "MI" };
     if (lower.includes("san diego")) return { citySlug: "san-diego", stateCode: "CA" };
 
-    const stateMatch = lower.match(/,?\s*([a-z]{2})$/);
-    if (stateMatch && stateMatch[1].length === 2) {
-      const city = lower.replace(/,?\s*[a-z]{2}$/, "").trim();
-      return { citySlug: city.replace(/[^a-z0-9]+/g, "-").replace(/-$/g, ""), stateCode: stateMatch[1].toUpperCase() };
-    }
     for (const [city, state] of Object.entries(cityToState)) {
       if (lower.includes(city)) {
         return { citySlug: city.replace(/[^a-z0-9]+/g, "-").replace(/-$/g, ""), stateCode: state };
       }
     }
-    return { citySlug: lower.replace(/[^a-z0-9]+/g, "-").replace(/-$/g, ""), stateCode: "WA" };
+    const hereKey = process.env.HERE_API_KEY || "";
+    if (hereKey) {
+      const url = new URL("https://geocode.search.hereapi.com/v1/geocode");
+      url.search = new URLSearchParams({ q: `${clean}, USA`, limit: "1", apiKey: hereKey }).toString();
+      const response = await fetch(url, { signal: AbortSignal.timeout(15000) });
+      if (response.ok) {
+        const payload: any = await response.json();
+        const address = payload.items?.[0]?.address;
+        const city = String(address?.city || clean).trim();
+        const stateCode = String(address?.stateCode || "").replace(/^US-/, "").toUpperCase();
+        if (city && /^[A-Z]{2}$/.test(stateCode)) {
+          return { citySlug: slugifyCity(city), stateCode };
+        }
+      }
+    }
+    throw new Error(`Cannot determine the state for location "${location}". Use the format City, ST.`);
   }
 
   private getCityToState(): Record<string, string> {
@@ -243,28 +667,34 @@ try {
         const priceVal = parseInt(offers.price) || 0;
         if (priceVal < 50000 || priceVal > 50000000) continue;
         const bedroomVal = parseInt(me.numberOfBedrooms) || 0;
-        const sqftVal = parseInt(me.floorSize?.value) || parseInt(me.livingArea) || 0;
+        const sqftVal = extractStructuredSqft(me);
         const street = address.streetAddress || "";
         const city = address.addressLocality || "";
         const state = address.addressRegion || "";
         const zip = address.postalCode || "";
         const imageUrl = listing.image || "";
         const url = listing.url || "";
-        let bathrooms = parseInt(me.numberOfBathrooms) || 0;
-        if (!bathrooms) bathrooms = parseInt(me.bathroomsTotal) || 0;
+        const geo = me.geo || listing.geo || {};
+        const bathrooms = extractBathroomTotal(me);
+        const fullBathrooms = firstPositiveNumber(me.numberOfFullBathrooms, me.bathroomsFull);
+        const halfBathrooms = firstPositiveNumber(me.numberOfHalfBathrooms, me.bathroomsHalf);
         props.push({
           id: "r" + (i + 1),
           title: listing.name || street || (city ? "Home in " + city : bedroomVal + "BR Home"),
-          price: priceVal, bedrooms: bedroomVal, bathrooms, sqft: sqftVal,
+          price: priceVal, bedrooms: bedroomVal, bathrooms, fullBathrooms, halfBathrooms, sqft: sqftVal,
+          sqftSource: sqftVal > 0 ? "structured-data" : undefined,
           location: city ? city + ", " + state + (zip ? " " + zip : "") : state, features: [],
           url: url, imageUrl: imageUrl,
           listedAt: new Date().toISOString(), source: "Realtor.com",
+          latitude: Number.isFinite(Number(geo.latitude)) ? Number(geo.latitude) : undefined,
+          longitude: Number.isFinite(Number(geo.longitude)) ? Number(geo.longitude) : undefined,
+          description: me.description || listing.description || undefined,
         });
       }
     } catch (e: any) {
       console.log("[FirecrawlSkill] JSON-LD parse error:", e.message);
     }
-    if (markdown) this.enrichBathroomsFromMarkdown(props, markdown);
+    this.enrichBathroomsFromMarkdown(props, `${markdown || ""}\n${raw}`);
     return props;
   }
 
@@ -272,6 +702,22 @@ try {
   private enrichBathroomsFromMarkdown(props: Property[], markdown: string): void {
     const lines = markdown.split("\n").map(l => l.trim());
     for (const prop of props) {
+      // Realtor's rendered search payload commonly uses label-first text such
+      // as "beds 2 baths 2 sqft square feet 1,570". Match it inside the exact
+      // address window before falling back to the older price-card heuristic.
+      const metrics = extractCoreListingMetrics(markdown, prop.title);
+      if (metrics.bedrooms != null) prop.bedrooms = metrics.bedrooms;
+      if (metrics.bathrooms != null) prop.bathrooms = metrics.bathrooms;
+      if (metrics.fullBathrooms != null) prop.fullBathrooms = metrics.fullBathrooms;
+      if (metrics.halfBathrooms != null) prop.halfBathrooms = metrics.halfBathrooms;
+      if (metrics.sqft != null) {
+        prop.sqft = metrics.sqft;
+        prop.sqftSource = metrics.sqftSource;
+      }
+      if (hasNewConstructionEvidence(markdown, prop.title)
+          && !prop.features.some((feature) => /new construction/i.test(feature))) {
+        prop.features.push("new construction");
+      }
       if (prop.bathrooms > 0) continue;
       const streetPart = (prop.title.split(",")[0] || "").replace(/^[0-9]+\s*/, "").substring(0, 20).toLowerCase();
       const priceStr = "$" + prop.price.toLocaleString();
@@ -291,29 +737,12 @@ try {
         const ctx = lines.slice(ctxStart, ctxEnd).join(" ");
         const bathMatch = ctx.match(/(\d[\d.]*)\+?\s*(?:ba|bath|baths)\b/i);
         if (bathMatch) {
-          const v = Math.floor(parseFloat(bathMatch[1]));
+          const v = parseFloat(bathMatch[1]);
           if (!isNaN(v) && v > 0 && v < 20) prop.bathrooms = v;
         }
         break;
       }
     }
-  }
-
-  private extractBathrooms(raw: string, props: Property[]): void {
-    const bathValues: number[] = [];
-    const metaBathRegex = /property-meta-bath[^>]*>([^<]+)</g;
-    let m;
-    while ((m = metaBathRegex.exec(raw)) !== null) {
-      const n = m[1].match(/[\d.]+/);
-      if (n) { const v = parseFloat(n[0]); if (!isNaN(v) && v > 0 && v < 20) bathValues.push(v); }
-    }
-    const bathRegex = />\s*([\d.]+)\+?\s*(?:bath|ba)\s*</gi;
-    while ((m = bathRegex.exec(raw)) !== null) {
-      const v = parseFloat(m[1]);
-      if (!isNaN(v) && v > 0 && v < 20) bathValues.push(v);
-    }
-    console.log("[FirecrawlSkill] Bath values found:", bathValues.length);
-    for (let i = 0; i < props.length && i < bathValues.length; i++) props[i].bathrooms = bathValues[i];
   }
 
   private extractAll(str: string, regex: RegExp): any[][] {
@@ -347,7 +776,9 @@ try {
       if (seen.has(key)) continue;
       seen.add(key);
 
-      let bedrooms = 3, bathrooms = 2, sqft = 0, address = "";
+      // Never invent common-looking defaults. A missing field remains unknown
+      // and is surfaced as such by validation and the UI.
+      let bedrooms = 0, bathrooms = 0, sqft = 0, address = "";
       const contextLines = lines.slice(Math.max(0, i - 6), Math.min(lines.length, i + 8));
       const context = contextLines.join(" ");
 
@@ -355,11 +786,15 @@ try {
       const bedMatch = context.match(/(\d+)\s*(?:bd|bed|beds)\b|\b(\d+)\s*br\b/i);
       const bathMatch = context.match(/(\d[\d.]*)\+?\s*(?:ba|bath|baths)\b/i);
       const sqftMatch = context.match(/([\d,]+)\s*(?:sqft|square feet)/i);
+      const coreMetrics = extractCoreListingMetrics(context);
 
-      if (isStudio) { bedrooms = 1; bathrooms = 1; }
-      else if (bedMatch) { bedrooms = parseInt(bedMatch[1] || bedMatch[2]) || 3; }
-      if (bathMatch) { bathrooms = parseInt(bathMatch[1]) || 2; }
-      if (sqftMatch) sqft = parseInt(sqftMatch[1].replace(/,/g, "")) || 0;
+      if (coreMetrics.bedrooms != null) bedrooms = coreMetrics.bedrooms;
+      else if (isStudio) bedrooms = 0;
+      else if (bedMatch) bedrooms = parseInt(bedMatch[1] || bedMatch[2]) || 0;
+      if (coreMetrics.bathrooms != null) bathrooms = coreMetrics.bathrooms;
+      else if (bathMatch) bathrooms = parseFloat(bathMatch[1]) || 0;
+      if (coreMetrics.sqft != null) sqft = coreMetrics.sqft;
+      else if (sqftMatch) sqft = parseInt(sqftMatch[1].replace(/,/g, "")) || 0;
 
       for (const l of contextLines) {
         if (!l || l.length < 5 || l.length > 120) continue;
@@ -385,8 +820,8 @@ try {
 
     if (props.length > 0) {
       const filteredProps = props.filter((p: any) => {
-        if (criteria.minBedrooms && p.bedrooms < criteria.minBedrooms) return false;
-        if (criteria.minBathrooms && p.bathrooms < criteria.minBathrooms) return false;
+        if (criteria.minBedrooms && p.bedrooms > 0 && p.bedrooms < criteria.minBedrooms) return false;
+        if (criteria.minBathrooms && p.bathrooms > 0 && p.bathrooms < criteria.minBathrooms) return false;
         if (criteria.maxPrice && p.price > criteria.maxPrice) return false;
         if (criteria.minPrice && p.price < criteria.minPrice) return false;
         return true;
@@ -479,4 +914,281 @@ try {
   }
 }
 
+function rankAssessedProperties(properties: Property[], criteria: SearchCriteria): Property[] {
+  const statusOrder = { verified: 0, unknown: 1, failed: 2 } as const;
+  return properties
+    .map((property) => ({ ...property, criteriaMatch: assessProperty(property, criteria) }))
+    .sort((a, b) => {
+      const statusDifference = statusOrder[a.criteriaMatch.overall] - statusOrder[b.criteriaMatch.overall];
+      return statusDifference || b.criteriaMatch.score - a.criteriaMatch.score || a.price - b.price;
+    });
+}
+
 export const firecrawlSkill = new FirecrawlSkill();
+
+export function requiresListingDetail(criteria: SearchCriteria): boolean {
+  const schoolRequested = criteria.schoolMinRating != null || criteria.schoolAtLeastOneRating != null;
+  const schoolDetailEnabled = /^(?:1|true|yes)$/i.test(process.env.RE_REALTOR_SCHOOL_DETAIL_ENABLED || "true");
+  return Boolean(criteria.mustHave?.length || criteria.exteriorMaterials?.length || criteria.communityFeatures?.length
+    || criteria.distanceConstraints?.some((constraint) => constraint.category === "grocery")
+    || (schoolRequested && schoolDetailEnabled));
+}
+
+export function isSchoolOnlyDetailRequest(criteria: SearchCriteria): boolean {
+  const schoolRequested = criteria.schoolMinRating != null || criteria.schoolAtLeastOneRating != null;
+  return schoolRequested && !criteria.mustHave?.length && !criteria.exteriorMaterials?.length
+    && !criteria.communityFeatures?.length
+    && !criteria.distanceConstraints?.some((constraint) => constraint.category === "grocery");
+}
+
+export function resolveFirecrawlBudget(criteria: SearchCriteria, configured = process.env.RE_FIRECRAWL_REQUEST_BUDGET): number {
+  const hasSchoolCriteria = criteria.schoolMinRating != null || criteria.schoolAtLeastOneRating != null;
+  // These floors are completeness guarantees, not merely defaults. An old
+  // PowerShell value such as RE_FIRECRAWL_REQUEST_BUDGET=15 must not silently
+  // disable detail enrichment for the later candidates in a 20-property run.
+  const minimum = hasSchoolCriteria ? 45 : 30;
+  const requested = Number(configured);
+  return Number.isFinite(requested) && requested > minimum ? Math.min(requested, 100) : minimum;
+}
+
+export function shouldVerifyBathroomsSeparately(criteria: SearchCriteria): boolean {
+  // When a detail page is already required, its full/half bath fields are both
+  // more authoritative and free of an extra exact-address Firecrawl search.
+  return !requiresListingDetail(criteria);
+}
+
+export function extractInteractText(payload: unknown): string {
+  const root = payload && typeof payload === "object" ? payload as Record<string, unknown> : { result: payload };
+  const flatten = (value: unknown, depth = 0): string => {
+    if (value == null || depth > 5) return "";
+    if (typeof value === "string") {
+      const trimmed = value.trim();
+      if (/^[\[{]/.test(trimmed)) {
+        try {
+          const nested = flatten(JSON.parse(trimmed), depth + 1);
+          if (nested) return nested;
+        } catch { /* Keep the original text. */ }
+      }
+      return value;
+    }
+    if (Array.isArray(value)) return value.map((item) => flatten(item, depth + 1)).filter(Boolean).join("\n");
+    if (typeof value === "object") {
+      const object = value as Record<string, unknown>;
+      const preferred = ["value", "text", "content", "markdown", "output", "result", "stdout"];
+      const selected = preferred.map((key) => flatten(object[key], depth + 1)).filter(Boolean);
+      if (selected.length) return selected.join("\n");
+      return Object.values(object).map((item) => flatten(item, depth + 1)).filter(Boolean).join("\n");
+    }
+    return String(value);
+  };
+  for (const value of [root.result, root.output, root.stdout]) {
+    const text = flatten(value);
+    if (text) return text;
+  }
+  return "";
+}
+
+export function detailNeedsInteractiveExpansion(content: string, criteria: SearchCriteria): boolean {
+  if (content.trim().length < 1500 || !/\bProperty details\b/i.test(content)) return true;
+  const schoolRequested = criteria.schoolMinRating != null || criteria.schoolAtLeastOneRating != null;
+  const hasSchoolRatings = /(?:out\s+of\s+10|GreatSchools(?:\s+Rating)?|(?:rating|score)\s*[:\-]?\s*\d{1,2}\s*\/\s*10)/i.test(content);
+  const hasAllSchoolStages = /elementary|primary/i.test(content) && /middle|junior high/i.test(content) && /high school|secondary/i.test(content);
+  if (schoolRequested && !(hasSchoolRatings && hasAllSchoolStages)) return true;
+  const groceryRequested = criteria.distanceConstraints?.some((constraint) => constraint.category === "grocery");
+  if (groceryRequested && !/\b(?:Groceries|Grocery|Supermarket|Shopping Center)\b/i.test(content)) return true;
+  if (criteria.communityFeatures?.length && !/\b(?:Community|Amenities|Neighborhood)\b/i.test(content)) return true;
+  return false;
+}
+
+function hasCompleteRealtorSchoolEvidence(property: Property): boolean {
+  const types = new Set((property.schools || [])
+    .filter((school) => school.relationship === "listing-associated" && school.rating != null)
+    .map((school) => school.type));
+  return types.has("k12") || (types.has("elementary") && types.has("middle") && types.has("high"));
+}
+
+function needsTargetedFeatureSearch(property: Property, criteria: SearchCriteria): boolean {
+  const needsBrick = (criteria.exteriorMaterials || []).some((material) => material.toLowerCase() === "brick")
+    && property.exteriorCoverage !== "all-sides";
+  const needsCommunity = (criteria.communityFeatures || []).some((requested) =>
+    !(property.communityFeatures || []).some((found) => found.toLowerCase().includes(requested.toLowerCase())));
+  return needsBrick || needsCommunity;
+}
+
+export function selectCachedLiveProperties(
+  sessions: UserSession[],
+  location: string,
+  maxAgeMs = 7 * 24 * 60 * 60 * 1000,
+  limit = 20,
+  now = Date.now(),
+): Property[] {
+  const requestedTokens = normalizeLocationTokens(location);
+  const seen = new Set<string>();
+  const results: Property[] = [];
+  const recent = [...sessions]
+    .filter((session) => now - Date.parse(session.updatedAt) <= maxAgeMs)
+    .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
+
+  for (const session of recent) {
+    for (const property of session.matchedProperties || []) {
+      if (!/realtor(?:\.com)?/i.test(property.source || "") || /demo/i.test(property.source || "")) continue;
+      const haystack = `${property.location || ""} ${property.title || ""}`.toLowerCase();
+      if (requestedTokens.length && !requestedTokens.every((token) => haystack.includes(token))) continue;
+      const key = (property.url || `${property.title}|${property.location}`).trim().toLowerCase();
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      results.push(addDiagnostic(
+        clearDerivedMatch(repairCachedCoreMetrics({ ...property, source: "Realtor.com (cached prior live result)" })),
+        "listing-search",
+        "warning",
+        `Cached from a prior live Realtor search saved at ${session.updatedAt}.`,
+      ));
+      if (results.length >= limit) return results;
+    }
+  }
+  return results;
+}
+
+function normalizeLocationTokens(location: string): string[] {
+  return location.toLowerCase()
+    .replace(/\s+(priced|under|over|budget|max|min|million|thousand|k|dollars?).*$/i, "")
+    .split(/[\s,]+/)
+    .map((token) => token.trim())
+    .filter(Boolean);
+}
+
+function clearDerivedMatch(property: Property): Property {
+  const copy = { ...property };
+  delete copy.criteriaMatch;
+  // Operational failures from an older run are not property evidence.
+  delete copy.evidenceDiagnostics;
+  return copy;
+}
+
+function repairCachedCoreMetrics(property: Property): Property {
+  const content = [property.listingEvidenceText, property.description].filter(Boolean).join("\n");
+  if (!content) return property;
+  const metrics = extractCoreListingMetrics(content, property.title);
+  const features = hasNewConstructionEvidence(content, property.title)
+    && !(property.features || []).some((feature) => /new construction/i.test(feature))
+    ? [...(property.features || []), "new construction"]
+    : property.features;
+  return {
+    ...property,
+    features,
+    bedrooms: metrics.bedrooms ?? property.bedrooms,
+    bathrooms: metrics.bathrooms ?? property.bathrooms,
+    fullBathrooms: metrics.fullBathrooms ?? property.fullBathrooms,
+    halfBathrooms: metrics.halfBathrooms ?? property.halfBathrooms,
+    sqft: metrics.sqft ?? property.sqft,
+    sqftSource: metrics.sqftSource ?? property.sqftSource ?? (property.sqft > 0 ? "cached" : undefined),
+  };
+}
+
+function addCoreDataDiagnostic(property: Property): Property {
+  const missing = [
+    property.bedrooms > 0 ? "" : "bedrooms",
+    property.bathrooms > 0 ? "" : "bathrooms",
+    property.sqft > 0 ? "" : "living area",
+  ].filter(Boolean);
+  return missing.length
+    ? addDiagnostic(property, "listing-search", "warning", `Core listing data unavailable: ${missing.join(", ")}. Values were not guessed.`)
+    : property;
+}
+
+function positiveNumber(value: string | undefined, fallback: number): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function extractStructuredSqft(listing: any): number {
+  const candidates = [
+    listing?.floorSize?.value,
+    listing?.livingArea?.value,
+    listing?.livingArea,
+    listing?.buildingArea?.value,
+    listing?.buildingArea,
+    listing?.sqft,
+  ];
+  for (const candidate of candidates) {
+    const parsed = Number(String(candidate ?? "").replace(/,/g, "").match(/[\d.]+/)?.[0]);
+    if (Number.isFinite(parsed) && parsed > 100 && parsed < 100000) return Math.round(parsed);
+  }
+  return 0;
+}
+
+function normalizePropertyAddress(property: Property): string {
+  return `${property.title}|${property.location}`.toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+function slugifyCity(city: string): string {
+  return city.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+}
+
+function isUsStateCode(value: string): boolean {
+  return new Set([
+    "AL","AK","AZ","AR","CA","CO","CT","DE","FL","GA","HI","ID","IL","IN","IA","KS","KY","LA","ME","MD","MA","MI","MN","MS","MO","MT","NE","NV","NH","NJ","NM","NY","NC","ND","OH","OK","OR","PA","RI","SC","SD","TN","TX","UT","VT","VA","WA","WV","WI","WY","DC","PR","VI","GU","AS","MP",
+  ]).has(value.toUpperCase());
+}
+
+function firstPositiveNumber(...values: unknown[]): number | undefined {
+  for (const value of values) {
+    const number = Number(value);
+    if (Number.isFinite(number) && number > 0 && number < 20) return number;
+  }
+  return undefined;
+}
+
+function extractBathroomTotal(listing: any): number {
+  const full = firstPositiveNumber(listing.numberOfFullBathrooms, listing.bathroomsFull);
+  const half = firstPositiveNumber(listing.numberOfHalfBathrooms, listing.bathroomsHalf);
+  const threeQuarter = firstPositiveNumber(listing.numberOfThreeQuarterBathrooms, listing.bathroomsThreeQuarter);
+  // Preserve the number of bathroom rooms used by MLS/Zillow total-bathroom
+  // displays. The UI also shows the full/half breakdown so this is unambiguous.
+  if (full != null && (half != null || threeQuarter != null)) {
+    return full + (half || 0) + (threeQuarter || 0);
+  }
+  return firstPositiveNumber(
+    listing.numberOfBathroomsTotal, listing.bathroomsTotal, listing.numberOfBathrooms,
+    listing.bathrooms, full, listing.description?.baths,
+  ) || 0;
+}
+
+function hasNewConstructionEvidence(content: string, propertyTitle: string): boolean {
+  const normalized = content.replace(/\s+/g, " ");
+  const address = propertyTitle.split(",")[0].trim().toLowerCase();
+  if (!address) return false;
+  const lower = normalized.toLowerCase();
+  let from = 0;
+  for (let occurrence = 0; occurrence < 8; occurrence++) {
+    const index = lower.indexOf(address, from);
+    if (index < 0) break;
+    const window = normalized.slice(Math.max(0, index - 240), index + 700);
+    if (/\b(?:new construction|built by|builder)\b/i.test(window)) return true;
+    from = index + address.length;
+  }
+  return false;
+}
+
+function addDiagnostic(
+  property: Property,
+  stage: NonNullable<Property["evidenceDiagnostics"]>[number]["stage"],
+  status: NonNullable<Property["evidenceDiagnostics"]>[number]["status"],
+  detail: string,
+): Property {
+  return { ...property, evidenceDiagnostics: [...(property.evidenceDiagnostics || []), { stage, status, detail }] };
+}
+
+async function mapWithConcurrency<T>(items: T[], concurrency: number, worker: (item: T) => Promise<void>): Promise<void> {
+  let nextIndex = 0;
+  const runners = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+    while (nextIndex < items.length) await worker(items[nextIndex++]);
+  });
+  await Promise.all(runners);
+}
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}

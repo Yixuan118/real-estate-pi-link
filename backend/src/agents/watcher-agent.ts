@@ -42,7 +42,9 @@ export class WatcherAgent {
           return;
         }
 
-        const newProperties = await firecrawlSkill.checkForNewProperties(session.criteria);
+        const candidates = await firecrawlSkill.checkForNewProperties(session.criteria);
+        const existing = new Set((session.matchedProperties || []).map((property) => property.url || property.title.toLowerCase()));
+        const newProperties = candidates.filter((property) => !existing.has(property.url || property.title.toLowerCase()));
 
         if (newProperties.length > 0) {
           console.log(`[WatcherAgent] Found ${newProperties.length} new properties for session ${sessionId}`);

@@ -34,8 +34,9 @@ Parse the scraped markdown content to extract:
 ### 3. Handle Failures
 If Firecrawl returns no data or the response is empty:
 - Log the error
-- Fall back to demo database if available
-- Continue with partial or cached results
+- Prefer recently cached real Realtor results and clearly label them as non-live
+- Never silently substitute demo properties for live search results
+- Use the demo database only when `RE_ALLOW_DEMO_FALLBACK=true` is explicitly enabled for testing
 
 ## Output Schema
 
@@ -93,4 +94,4 @@ export FIRECRAWL_API_KEY="your_firecrawl_key"
 ## Notes
 - Zillow blocks automated scraping. The project uses Realtor.com as the primary data source.
 - Firecrawl returns markdown content which is parsed into structured property objects.
-- If Firecrawl fails, a demo database with 45+ properties is used as fallback.
+- If Firecrawl fails, cached real listings may be used with a visible stale-data warning. Demo fallback is opt-in only.
