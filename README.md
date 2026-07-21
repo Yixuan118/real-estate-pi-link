@@ -143,6 +143,7 @@ The deterministic `criteriaMatch` layer is authoritative for verified, failed, a
 | `RE_DETAIL_ENRICH_LIMIT` | No | Detail pages per search; default/max `20`. |
 | `RE_SCHOOL_ENRICH_LIMIT` | No | School-enriched properties; default/max `20`. |
 | `RE_GEO_ENRICH_LIMIT` | No | Map-enriched properties; default `20`. |
+| `RE_HIGHWAY_PROBE_CANDIDATE_LIMIT` | No | Nearby points on a named highway checked per property; default `8`, range `2-16`. |
 | `RE_FIRECRAWL_REQUEST_BUDGET` | No | Per-search Firecrawl credit ceiling. Completeness floors are 30 normally and 45 for school searches; stale lower values are ignored. |
 | `RE_BATHROOM_VERIFY_LIMIT` | No | Exact-address full/half-bath checks for high-risk new-construction cards; default `5`, max `10`. |
 | `RE_MIN_RESULT_TARGET` | No | Minimum candidate target before bounded Realtor pagination; default `10`. |

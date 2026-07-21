@@ -8,6 +8,8 @@ export interface HighwayDefinition {
   canonicalName: string;
   aliases: string[];
   anchors: HighwayAnchor[];
+  probeSpacingMiles: number;
+  probeCandidateLimit: number;
   source: string;
 }
 
@@ -24,12 +26,15 @@ const HIGHWAYS: HighwayDefinition[] = [
       "University Parkway",
     ],
     // Endpoints from the Georgia DOT State Route Network, route code 00031600.
-    // Routing toward both ends lets HERE reveal the first legal point where a
-    // property route joins GA-316, including at-grade access points.
+    // HERE traces the highway between these endpoints once, then property
+    // routes target nearby points on that trace. The endpoints are no longer
+    // the only access candidates.
     anchors: [
       { name: "GA-316 west terminus at I-85", lat: 33.9624146746, lng: -84.1065900256 },
       { name: "GA-316 east terminus at GA-10 Loop", lat: 33.9126948703, lng: -83.4511025177 },
     ],
+    probeSpacingMiles: 0.75,
+    probeCandidateLimit: 8,
     source: "Georgia DOT State Route Network (route 00031600)",
   },
 ];

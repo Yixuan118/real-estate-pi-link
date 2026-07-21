@@ -1,6 +1,7 @@
 import { DistanceConstraint, Property, SearchCriteria } from "../core/types";
 import { normalizeDistanceConstraint } from "../core/property-matcher";
 import { HighwayDefinition, isHighwayRoadLabel, resolveHighwayDefinition } from "../data/highway-registry";
+import { decode } from "@here/flexpolyline";
 
 interface LatLng { lat: number; lng: number }
 interface HerePlace { id: string; name: string; location: LatLng; straightLineMeters?: number }
@@ -16,6 +17,7 @@ export class HereMapsService {
   private placesCache = new Map<string, Promise<HerePlace[]>>();
   private routeCache = new Map<string, Promise<number | null>>();
   private highwayRouteCache = new Map<string, Promise<HighwayRouteResult | null>>();
+  private highwayProbeCache = new Map<string, Promise<LatLng[]>>();
 
   constructor(apiKey = process.env.HERE_API_KEY || "", fetchImpl: FetchLike = fetch) {
     this.apiKey = apiKey;
@@ -138,9 +140,27 @@ export class HereMapsService {
       return;
     }
 
-    const results: Array<HighwayRouteResult | null> = highway.anchors.map(() => null);
-    await mapWithConcurrency(highway.anchors.map((_, index) => index), 2, async (index) => {
-      results[index] = await this.highwayAccessRoute(origin, highway.anchors[index], highway);
+    const corridorProbes = await this.highwayCorridorProbes(highway);
+    if (corridorProbes.length === 0) {
+      this.setHighwayEvaluation(property, constraint, {
+        status: "unknown",
+        detail: `HERE could not build a verified ${highway.canonicalName} road corridor for access checks.`,
+      });
+      return;
+    }
+    const candidateLimit = clamp(
+      Number(process.env.RE_HIGHWAY_PROBE_CANDIDATE_LIMIT || highway.probeCandidateLimit),
+      2,
+      16,
+    );
+    const candidates = corridorProbes
+      .map((point) => ({ point, distance: haversineMiles(origin, point) }))
+      .sort((a, b) => a.distance - b.distance)
+      .slice(0, candidateLimit)
+      .map((item) => item.point);
+    const results: Array<HighwayRouteResult | null> = candidates.map(() => null);
+    await mapWithConcurrency(candidates.map((_, index) => index), 2, async (index) => {
+      results[index] = await this.highwayAccessRoute(origin, candidates[index], highway);
     });
     const nearest = results
       .filter((item): item is HighwayRouteResult => item != null)
@@ -334,6 +354,61 @@ export class HereMapsService {
     return request;
   }
 
+  private async highwayCorridorProbes(highway: HighwayDefinition): Promise<LatLng[]> {
+    const cached = this.highwayProbeCache.get(highway.canonicalName);
+    if (cached) return cached;
+    const request = this.fetchHighwayCorridorProbes(highway);
+    this.highwayProbeCache.set(highway.canonicalName, request);
+    return request;
+  }
+
+  private async fetchHighwayCorridorProbes(highway: HighwayDefinition): Promise<LatLng[]> {
+    if (highway.anchors.length < 2) return [];
+    const start = highway.anchors[0];
+    const end = highway.anchors[highway.anchors.length - 1];
+    const url = this.url("https://router.hereapi.com/v8/routes", {
+      transportMode: "car",
+      routingMode: "short",
+      departureTime: "any",
+      origin: `${start.lat},${start.lng}`,
+      destination: `${end.lat},${end.lng}`,
+      return: "polyline",
+      spans: "names,routeNumbers,length",
+      lang: "en-US",
+    });
+    const response = await this.fetchImpl(url);
+    if (!response.ok) throw new Error(`Highway corridor routing HTTP ${response.status}`);
+    const payload: any = await response.json();
+    const sections = payload.routes?.[0]?.sections;
+    if (!Array.isArray(sections)) return [];
+
+    const roadPoints: LatLng[] = [];
+    for (const section of sections) {
+      if (typeof section.polyline !== "string" || !Array.isArray(section.spans)) continue;
+      let decoded: number[][];
+      try {
+        decoded = decode(section.polyline).polyline;
+      } catch {
+        continue;
+      }
+      const spans = section.spans;
+      for (let index = 0; index < spans.length; index++) {
+        const span = spans[index];
+        const labels = [...roadLabels(span.names), ...roadLabels(span.routeNumbers)];
+        if (!labels.some((label) => isHighwayRoadLabel(label, highway))) continue;
+        const startOffset = clamp(Math.floor(Number(span.offset || 0)), 0, Math.max(0, decoded.length - 1));
+        const endOffset = index + 1 < spans.length
+          ? clamp(Math.floor(Number(spans[index + 1].offset || decoded.length)), startOffset + 1, decoded.length)
+          : decoded.length;
+        for (let pointIndex = startOffset; pointIndex < endOffset; pointIndex++) {
+          const point = finiteLatLng(decoded[pointIndex]?.[0], decoded[pointIndex]?.[1]);
+          if (point) roadPoints.push(point);
+        }
+      }
+    }
+    return samplePolyline(roadPoints, highway.probeSpacingMiles);
+  }
+
   private async fetchHighwayAccessRoute(
     origin: LatLng,
     destination: LatLng,
@@ -472,6 +547,42 @@ function clamp(value: number, min: number, max: number): number {
 }
 
 function safeError(error: unknown): string { return error instanceof Error ? error.message : String(error); }
+
+function haversineMiles(a: LatLng, b: LatLng): number {
+  const radians = (degrees: number) => degrees * Math.PI / 180;
+  const dLat = radians(b.lat - a.lat);
+  const dLng = radians(b.lng - a.lng);
+  const lat1 = radians(a.lat);
+  const lat2 = radians(b.lat);
+  const h = Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) ** 2;
+  return 3958.7613 * 2 * Math.asin(Math.min(1, Math.sqrt(h)));
+}
+
+function samplePolyline(points: LatLng[], spacingMiles: number): LatLng[] {
+  if (points.length === 0) return [];
+  const samples = [points[0]];
+  let remaining = spacingMiles;
+  for (let index = 1; index < points.length; index++) {
+    let from = points[index - 1];
+    const to = points[index];
+    let segmentMiles = haversineMiles(from, to);
+    while (segmentMiles >= remaining && segmentMiles > 0) {
+      const fraction = remaining / segmentMiles;
+      const sample = {
+        lat: from.lat + (to.lat - from.lat) * fraction,
+        lng: from.lng + (to.lng - from.lng) * fraction,
+      };
+      samples.push(sample);
+      from = sample;
+      segmentMiles -= remaining;
+      remaining = spacingMiles;
+    }
+    remaining -= segmentMiles;
+  }
+  const last = points[points.length - 1];
+  if (haversineMiles(samples[samples.length - 1], last) > 0.05) samples.push(last);
+  return samples;
+}
 
 function roadLabels(values: unknown): string[] {
   if (!Array.isArray(values)) return [];

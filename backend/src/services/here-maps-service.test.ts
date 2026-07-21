@@ -3,6 +3,7 @@ import test from "node:test";
 import { defaultSearchCriteria, Property } from "../core/types";
 import { assessProperty } from "../core/property-matcher";
 import { HereMapsService } from "./here-maps-service";
+import { encode } from "@here/flexpolyline";
 
 function athensProperty(): Property {
   return {
@@ -62,6 +63,7 @@ test("HERE coordinates support evidence-based UGA radius checks", async () => {
 
 test("HERE verifies driving distance to the first legal GA-316 access", async () => {
   const calls: URL[] = [];
+  let accessRouteCalls = 0;
   const mockFetch = async (input: string | URL | Request): Promise<Response> => {
     const url = new URL(String(input));
     calls.push(url);
@@ -69,10 +71,18 @@ test("HERE verifies driving distance to the first legal GA-316 access", async ()
       return json({ items: [{ position: { lat: 33.93, lng: -83.50 } }] });
     }
     if (url.hostname === "router.hereapi.com") {
-      const westboundAnchor = (url.searchParams.get("destination") || "").includes("-84.1065900256");
-      const localLength = westboundAnchor ? 1609.344 : 4828.032;
+      const corridorRequest = (url.searchParams.get("origin") || "").includes("-84.1065900256");
+      if (corridorRequest) {
+        return json({ routes: [{ sections: [{
+          polyline: encode({ polyline: [[33.96241, -84.10659], [33.93, -83.50], [33.91269, -83.45110]] }),
+          spans: [{ offset: 0, length: 65000, names: [{ value: "University Parkway" }], routeNumbers: [{ value: "GA-316" }] }],
+        }] }] });
+      }
+      accessRouteCalls++;
+      const localLength = accessRouteCalls === 1 ? 39268 : accessRouteCalls === 2 ? 1609.344 : 9656.064;
+      const accessName = accessRouteCalls === 1 ? "Patrick Mill Road" : accessRouteCalls === 2 ? "Epps Bridge Parkway" : "Paul Broun Parkway";
       return json({ routes: [{ sections: [{ spans: [
-        { offset: 0, length: localLength, names: [{ value: westboundAnchor ? "Epps Bridge Parkway" : "Atlanta Highway" }] },
+        { offset: 0, length: localLength, names: [{ value: accessName }] },
         { offset: 8, length: 804.672, names: [{ value: "Ramp" }] },
         { offset: 12, length: 10000, names: [{ value: "University Parkway" }], routeNumbers: [{ value: "GA-316" }] },
       ] }] }] });
@@ -89,7 +99,8 @@ test("HERE verifies driving distance to the first legal GA-316 access", async ()
   assert.equal(enriched.highwayAccessEvaluation?.accessName, "Epps Bridge Parkway");
   assert.equal(match.overall, "verified");
   assert.match(match.checks[0].detail, /1\.5 driving miles/);
-  assert.equal(calls.filter((url) => url.hostname === "router.hereapi.com").length, 2);
+  assert.equal(calls.filter((url) => url.hostname === "router.hereapi.com").length, 9);
+  assert.equal(calls.filter((url) => url.searchParams.get("return") === "polyline").length, 1);
   assert.ok(calls.filter((url) => url.hostname === "router.hereapi.com")
     .every((url) => url.searchParams.get("spans") === "names,routeNumbers,length"));
 });
