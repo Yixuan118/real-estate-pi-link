@@ -104,12 +104,10 @@ export class ListingEvidenceSearchService {
     if (!response.ok) throw new Error(`Firecrawl listing evidence search HTTP ${response.status}`);
     const payload: any = await response.json();
     const web = Array.isArray(payload.data?.web) ? payload.data.web : Array.isArray(payload.data) ? payload.data : [];
-    const expected = normalizeAddress(address);
     const relevant = web.filter((item: any) => {
       const url = String(item.url || "");
-      const text = normalizeAddress(`${item.title || ""} ${item.description || ""}`);
       return /^https?:\/\/(?:www\.)?(?:realtor\.com|redfin\.com|homes\.com)\//i.test(url)
-        && expected.split(" ").filter((token) => token.length > 2).slice(0, 4).every((token) => text.includes(token));
+        && isExactAddressResult(item, address);
     });
     return {
       content: relevant.map((item: any) => [item.title, item.description, item.markdown].filter(Boolean).join("\n")).join("\n"),
@@ -180,6 +178,20 @@ export class ListingEvidenceSearchService {
 
 function normalizeAddress(value: string): string {
   return value.toLowerCase().replace(/\b(?:unit|apt)\s+[^,]+/g, " ").replace(/[^a-z0-9]+/g, " ").trim();
+}
+
+function isExactAddressResult(item: any, address: string): boolean {
+  const expected = normalizeAddress(address);
+  const expectedWithoutZip = expected.replace(/\s+\d{5}(?:\s+\d{4})?$/, "").trim();
+  const identities = [...new Set([expected, expectedWithoutZip].filter((value) => value.length >= 8))];
+  const title = normalizeAddress(String(item.title || ""));
+  let url = String(item.url || "");
+  try { url = decodeURIComponent(url); } catch { /* Keep the original URL when percent encoding is malformed. */ }
+  const normalizedUrl = normalizeAddress(url);
+  // Search snippets often mention the requested address only in a related-home
+  // carousel. Evidence belongs to the requested property only when its primary
+  // result title or canonical URL identifies that exact address.
+  return identities.some((identity) => title === identity || title.startsWith(`${identity} `) || normalizedUrl.includes(identity));
 }
 
 export function extractCommunityName(property: Property): string {

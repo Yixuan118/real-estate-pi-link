@@ -25,6 +25,33 @@ test("adds exact-address four-sided-brick and community-lake evidence", async ()
   assert.equal(result.featureEvidence?.length, 2);
 });
 
+test("rejects four-sided-brick evidence from a different property that only mentions the target as related", async () => {
+  const mockFetch = (async () => new Response(JSON.stringify({ data: { web: [
+    {
+      title: "1185 Tallassee Rd, Athens, GA 30606",
+      description: "Four Sided Brick Exterior Elevation. Related homes: 180 Pointers Ridge Dr, Athens, GA 30606.",
+      url: "https://www.homes.com/property/1185-tallassee-rd-athens-ga/h3stglvytz0v4/",
+    },
+    {
+      title: "120 Maynard Ct, Athens, GA 30606",
+      description: "FOUR SIDED BRICK RANCH. Nearby: 180 Pointers Ridge Dr, Athens, GA 30606.",
+      url: "https://www.homes.com/property/120-maynard-ct-athens-ga/99x77x41zmhcl/",
+    },
+  ] } }), { status: 200, headers: { "Content-Type": "application/json" } })) as typeof fetch;
+  const property: Property = {
+    id: "pointers-ridge", title: "180 Pointers Ridge Dr, Athens, GA 30606", price: 275000,
+    bedrooms: 3, bathrooms: 2, sqft: 1160, location: "Athens, GA 30606", features: [], url: "",
+    listedAt: new Date().toISOString(), source: "test", exteriorCoverage: "unknown",
+  };
+
+  const result = await new ListingEvidenceSearchService("key", mockFetch).enrichProperty(property, {
+    ...defaultSearchCriteria(), exteriorMaterials: ["brick"],
+  });
+
+  assert.equal(result.exteriorCoverage, "unknown");
+  assert.deepEqual(result.featureEvidence || [], []);
+});
+
 test("searches subdivision amenities once and reuses the evidence across homes", async () => {
   let calls = 0;
   const mockFetch = (async (_url: string, init?: RequestInit) => {
