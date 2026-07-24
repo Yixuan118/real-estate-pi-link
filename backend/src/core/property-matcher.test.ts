@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { defaultSearchCriteria, Property } from "./types";
 import { regexExtract } from "./llm-service";
-import { assessProperty, extractCoreListingMetrics, extractListingFacts, extractPropertyEvidence, haversineMiles } from "./property-matcher";
+import { assessProperty, extractCoreListingMetrics, extractListingFacts, extractPropertyEvidence, haversineMiles, propertyMatchesRequestedMarket } from "./property-matcher";
 
 test("uses full and half bathroom evidence instead of an incomplete summary count", () => {
   const metrics = extractCoreListingMetrics(
@@ -145,6 +145,31 @@ test("recognizes HOA lake amenities in either sentence order without using mere 
   assert.deepEqual(extractPropertyEvidence(base, "Association Amenities: walking trails and a lake for residents.").communityFeatures, ["lake"]);
   assert.deepEqual(extractPropertyEvidence(base, "The lake is maintained by the HOA and available to residents.").communityFeatures, ["lake"]);
   assert.deepEqual(extractPropertyEvidence(base, "A public lake is located 2 miles from the property.").communityFeatures, []);
+});
+
+test("recognizes structured resident lake access but not an unrelated nearby lake", () => {
+  const base: Property = {
+    id: "lake-access", title: "1 Main St, Athens, GA 30606", price: 300000,
+    bedrooms: 3, bathrooms: 2, sqft: 1500, location: "Athens, GA 30606",
+    features: [], url: "", listedAt: new Date().toISOString(), source: "test",
+  };
+  assert.deepEqual(extractPropertyEvidence(base, "Association Amenities: Lake Access, Clubhouse").communityFeatures, ["lake"]);
+  assert.deepEqual(extractPropertyEvidence(base, "Community Features: Private Pond, Sidewalks").communityFeatures, ["pond"]);
+  assert.deepEqual(extractPropertyEvidence(base, "Lake Oconee is 28 miles away.").communityFeatures, []);
+});
+
+test("strict requested-market matching rejects same-name cities, nearby cities, and foreign results", () => {
+  const property = (location: string): Pick<Property, "title" | "location"> => ({
+    title: `1 Main St, ${location}`, location,
+  });
+  assert.equal(propertyMatchesRequestedMarket(property("Athens, GA 30606"), "Athens, GA"), true);
+  assert.equal(propertyMatchesRequestedMarket(property("Athens, Georgia 30606"), "Athens, GA"), true);
+  assert.equal(propertyMatchesRequestedMarket(property("Athens, OH 45701"), "Athens, GA"), false);
+  assert.equal(propertyMatchesRequestedMarket(property("Atlanta, GA 30303"), "Athens, GA"), false);
+  assert.equal(propertyMatchesRequestedMarket(property("Athens, Greece"), "Athens, GA"), false);
+  assert.equal(propertyMatchesRequestedMarket(property("Seattle, WA 98101"), "Seattle"), true);
+  assert.equal(propertyMatchesRequestedMarket(property("Seattle, Canada"), "Seattle"), false);
+  assert.equal(propertyMatchesRequestedMarket(property("Seattle, BC"), "Seattle"), false);
 });
 
 test("extracts Realtor detail-page brick, groceries, and score-first school evidence", () => {

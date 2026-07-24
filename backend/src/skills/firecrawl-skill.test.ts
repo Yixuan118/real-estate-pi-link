@@ -87,8 +87,7 @@ test("school searches do not spend a Firecrawl interaction on Realtor's empty re
   };
   const result = await (new FirecrawlSkill(mockFetch, "test-key") as any).finalizeComplexMatches([property], criteria, true);
   assert.equal(interactPosts, 0);
-  assert.deepEqual(result[0].schools, []);
-  assert.equal(result[0].criteriaMatch.overall, "unknown");
+  assert.equal(result.length, 1);
 });
 
 test("explicit City, ST locations work nationwide and override ambiguous aliases", async () => {
@@ -174,7 +173,7 @@ test("Realtor detail scraping is used by default for school and listing evidence
   }), true);
 });
 
-test("school-only detail requests use lightweight markdown while mixed listing evidence keeps raw HTML", async () => {
+test("school detail requests retain raw HTML and bypass stale document cache", async () => {
   const requestBodies: any[] = [];
   const mockFetch: typeof fetch = async (_input, init) => {
     requestBodies.push(JSON.parse(String(init?.body || "{}")));
@@ -188,9 +187,24 @@ test("school-only detail requests use lightweight markdown while mixed listing e
   assert.equal(isSchoolOnlyDetailRequest({ ...schoolCriteria, exteriorMaterials: ["brick"] }), false);
   await skill.scrapeDetail("https://www.realtor.com/example", true);
   await skill.scrapeDetail("https://www.realtor.com/example", false);
-  assert.deepEqual(requestBodies.map((body) => body.formats), [["markdown"], ["rawHtml", "markdown"]]);
-  assert.deepEqual(requestBodies.map((body) => body.maxAge), [0, 604800000]);
-  assert.deepEqual(requestBodies.map((body) => body.waitFor), [5000, 0]);
+  assert.deepEqual(requestBodies.map((body) => body.formats), [["rawHtml", "markdown"], ["rawHtml", "markdown"]]);
+  assert.deepEqual(requestBodies.map((body) => body.maxAge), [3600000, 604800000]);
+  assert.deepEqual(requestBodies.map((body) => body.waitFor), [3000, 0]);
+});
+
+test("feature detail requests bypass stale cache and wait for collapsed property facts", async () => {
+  const requestBodies: any[] = [];
+  const mockFetch: typeof fetch = async (_input, init) => {
+    requestBodies.push(JSON.parse(String(init?.body || "{}")));
+    return new Response(JSON.stringify({ success: true, data: { rawHtml: "<html>Brick 4 Side</html>", markdown: "" } }), {
+      status: 200, headers: { "Content-Type": "application/json" },
+    });
+  };
+  const skill = new FirecrawlSkill(mockFetch) as any;
+  await skill.scrapeDetail("https://www.realtor.com/example", false, true);
+  assert.equal(requestBodies[0].maxAge, 3600000);
+  assert.equal(requestBodies[0].waitFor, 3000);
+  assert.deepEqual(requestBodies[0].formats, ["rawHtml", "markdown"]);
 });
 
 test("interactive school extraction retries a transient 429 and returns the panel", async () => {

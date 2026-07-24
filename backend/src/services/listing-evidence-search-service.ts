@@ -130,13 +130,16 @@ export class ListingEvidenceSearchService {
     const payload: any = await response.json();
     const web = Array.isArray(payload.data?.web) ? payload.data.web : Array.isArray(payload.data) ? payload.data : [];
     const tokens = normalizeAddress(communityName).split(" ").filter((token) => token.length > 2);
+    const marketTokens = normalizeAddress(cityState).split(" ").filter((token) => token.length > 2);
     const relevant = web.filter((item: any) => {
       const content = `${item.title || ""} ${item.description || ""} ${item.markdown || ""}`;
       const normalized = normalizeAddress(content);
       return /^https?:\/\//i.test(String(item.url || ""))
         && tokens.every((token) => normalized.includes(token))
+        && marketTokens.every((token) => normalized.includes(token))
         && /\b(?:lake|pond)\b/i.test(content)
-        && /\b(?:community|neighborhood|subdivision|amenit|association|hoa|residents?)\b/i.test(content);
+        && (/\b(?:community|neighborhood|subdivision|amenit|association|hoa|residents?)[^.;]{0,180}\b(?:lake|pond)\b/i.test(content)
+          || /\b(?:lake|pond)\b[^.;]{0,180}\b(?:community|neighborhood|subdivision|amenit|association|hoa|residents?|access|privileges?)\b/i.test(content));
     });
     return {
       content: relevant.map((item: any) => [item.title, item.description, item.markdown].filter(Boolean).join("\n")).join("\n"),

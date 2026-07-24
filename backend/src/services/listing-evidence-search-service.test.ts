@@ -60,8 +60,8 @@ test("searches subdivision amenities once and reuses the evidence across homes",
     assert.match(body.query, /Lantern Walk/);
     assert.equal(body.includeDomains, undefined);
     return new Response(JSON.stringify({ data: { web: [{
-      title: "Lantern Walk community amenities",
-      description: "Lantern Walk is a neighborhood whose community amenities include a residents lake and walking trail.",
+      title: "Lantern Walk community amenities - Athens, GA",
+      description: "Lantern Walk in Athens, GA is a neighborhood whose community amenities include a residents lake and walking trail.",
       url: "https://lantern-walk.example/amenities",
     }] } }), { status: 200, headers: { "Content-Type": "application/json" } });
   }) as typeof fetch;

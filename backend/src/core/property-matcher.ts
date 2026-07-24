@@ -57,8 +57,10 @@ export function extractPropertyEvidence(property: Property, content: string): Pr
     property.exteriorCoverage = property.exteriorCoverage || "partial";
   }
 
-  if (/\b(?:community|neighborhood|subdivision|hoa|association|amenit(?:y|ies)|residents?)[^.]{0,120}\b(?:lake|pond)\b/i.test(text)
-      || /\b(?:lake|pond)\b[^.]{0,120}\b(?:community|neighborhood|subdivision|hoa|association|amenit(?:y|ies)|residents?|resident access)\b/i.test(text)
+  if (/\b(?:community|neighborhood|subdivision|hoa|association|amenit(?:y|ies)|residents?|common areas?|shared)[^.;]{0,180}\b(?:lake|pond)\b/i.test(text)
+      || /\b(?:lake|pond)\b[^.;]{0,180}\b(?:community|neighborhood|subdivision|hoa|association|amenit(?:y|ies)|residents?|resident access|privileges?|common areas?|shared|maintained)\b/i.test(text)
+      || /\b(?:lake|pond)\s+(?:access|privileges?|amenit(?:y|ies))\b/i.test(text)
+      || /\b(?:community features?|association amenities?|subdivision amenities?|neighborhood amenities?)\s*[:\-]\s*[^.;]{0,240}\b(?:lake|pond)\b/i.test(text)
       || /小区|社区/.test(text) && /湖|池塘/.test(text)) {
     communityFeatures.add(lower.includes("pond") || text.includes("池塘") ? "pond" : "lake");
   }
@@ -196,11 +198,7 @@ export function assessProperty(property: Property, criteria: SearchCriteria): Pr
   ].filter(Boolean).join(" ").toLowerCase();
 
   if (criteria.location) {
-    const expected = parseLocationParts(criteria.location);
-    const actual = normalizeText(property.location || property.title);
-    const cityMatches = expected.city ? actual.includes(expected.city) : true;
-    const stateMatches = expected.state ? new RegExp(`\\b${escapeRegex(expected.state)}\\b`, "i").test(actual) : true;
-    checks.push(cityMatches && stateMatches
+    checks.push(propertyMatchesRequestedMarket(property, criteria.location)
       ? verified(`location: ${criteria.location}`, `Listing location is ${property.location}.`)
       : failed(`location: ${criteria.location}`, `Listing location is ${property.location || "unavailable"}, not the requested market.`));
   }
@@ -383,9 +381,51 @@ export function assessProperty(property: Property, criteria: SearchCriteria): Pr
   return { overall, score, checks };
 }
 
-function parseLocationParts(location: string): { city: string; state: string } {
-  const parts = location.split(",").map((part) => normalizeText(part)).filter(Boolean);
-  return { city: parts[0] || "", state: parts[1] || "" };
+export function propertyMatchesRequestedMarket(property: Pick<Property, "title" | "location">, location: string): boolean {
+  const expected = parseLocationParts(location);
+  const actual = parseLocationParts(property.location || property.title);
+  if (!expected.city || !actual.city || expected.city !== actual.city) return false;
+  // Realtor is a US source. A candidate without a recognizable US state is
+  // never allowed to satisfy a bare-city request (for example Athens, Greece).
+  if (!actual.state) return false;
+  if (expected.state && actual.state !== expected.state) return false;
+  if (expected.zip && actual.zip !== expected.zip) return false;
+  return true;
+}
+
+function parseLocationParts(location: string): { city: string; state: string; zip: string } {
+  const cleaned = String(location || "")
+    .replace(/\s+(?:priced|under|over|budget|max|min|million|thousand|dollars?).*$/i, "")
+    .trim();
+  const zip = cleaned.match(/\b(\d{5})(?:-\d{4})?\b/)?.[1] || "";
+  const parts = cleaned.split(",").map((part) => normalizeText(part)).filter(Boolean);
+  if (parts.length >= 2) {
+    const statePart = parts.at(-1)!.replace(/\b\d{5}(?:\s+\d{4})?\b/g, "").trim();
+    return { city: parts.at(-2)!, state: normalizeUsState(statePart), zip };
+  }
+  const normalized = normalizeText(cleaned).replace(/\b\d{5}(?:\s+\d{4})?\b/g, "").trim();
+  const stateMatch = normalized.match(/^(.*?)\s+([a-z]{2})$/);
+  return stateMatch
+    ? { city: stateMatch[1].trim(), state: normalizeUsState(stateMatch[2]), zip }
+    : { city: normalized, state: "", zip };
+}
+
+function normalizeUsState(value: string): string {
+  const aliases: Record<string, string> = {
+    alabama: "al", alaska: "ak", arizona: "az", arkansas: "ar", california: "ca", colorado: "co",
+    connecticut: "ct", delaware: "de", florida: "fl", georgia: "ga", hawaii: "hi", idaho: "id",
+    illinois: "il", indiana: "in", iowa: "ia", kansas: "ks", kentucky: "ky", louisiana: "la",
+    maine: "me", maryland: "md", massachusetts: "ma", michigan: "mi", minnesota: "mn",
+    mississippi: "ms", missouri: "mo", montana: "mt", nebraska: "ne", nevada: "nv",
+    "new hampshire": "nh", "new jersey": "nj", "new mexico": "nm", "new york": "ny",
+    "north carolina": "nc", "north dakota": "nd", ohio: "oh", oklahoma: "ok", oregon: "or",
+    pennsylvania: "pa", "rhode island": "ri", "south carolina": "sc", "south dakota": "sd",
+    tennessee: "tn", texas: "tx", utah: "ut", vermont: "vt", virginia: "va", washington: "wa",
+    "west virginia": "wv", wisconsin: "wi", wyoming: "wy", "district of columbia": "dc",
+  };
+  const normalized = normalizeText(value);
+  const stateCodes = new Set([...Object.values(aliases), "pr", "vi", "gu", "as", "mp"]);
+  return aliases[normalized] || (stateCodes.has(normalized) ? normalized : "");
 }
 
 function normalizeText(value: string): string {

@@ -45,6 +45,26 @@ test("extracts Realtor listing-agent schools and compact circle ratings", () => 
   assert.deepEqual(schools.map((school) => school.distanceMiles), [0.5, 2, 3.6]);
 });
 
+test("extracts Realtor circle ratings when school names are markdown links", () => {
+  const schools = extractSchoolEvidence(`
+    7 10 7 out of 10
+    [Timothy Elementary School](https://www.realtor.com/local/schools/Timothy-Elementary-School-1)
+    Grades K-5
+    4 10 4 out of 10
+    [Clarke Middle School](https://www.realtor.com/local/schools/Clarke-Middle-School-2)
+    Grades 6-8
+    5 10 5 out of 10
+    [Clarke Central High School](https://www.realtor.com/local/schools/Clarke-Central-High-School-3)
+    Grades 9-12
+  `, "https://www.realtor.com/realestateandhomes-detail/example");
+
+  assert.deepEqual(schools.map((school) => [school.name, school.rating, school.type]), [
+    ["Timothy Elementary School", 7, "elementary"],
+    ["Clarke Middle School", 4, "middle"],
+    ["Clarke Central High School", 5, "high"],
+  ]);
+});
+
 test("extracts property-associated schools from Realtor's server-rendered nearby-school links", () => {
   const content = `The schools near 1080 Belmont Rd, include
     [Whit Davis Road Elementary School](https://www.realtor.com/local/schools/Whit-Davis-Road-Elementary-School-0718577561),
@@ -201,13 +221,17 @@ test("parses the rating formats used by Realtor and GreatSchools pages", () => {
   assert.equal(extractGreatSchoolsRating("Parent review: 10 out of 10"), undefined);
 });
 
-test("strict assignment mode does not spend Firecrawl calls on an address with no official schools", async () => {
+test("strict mode rejects school evidence from a non-exact Realtor property result", async () => {
   let calls = 0;
   const mockFetch = (async () => {
     calls += 1;
-    throw new Error("should not be called");
+    return new Response(JSON.stringify({ data: { web: [{
+      title: "2 Other St, Athens, GA 30606",
+      url: "https://www.realtor.com/realestateandhomes-detail/2-Other-St_Athens_GA_30606",
+      description: "8/10 Other Elementary School",
+    }] } }), { status: 200, headers: { "Content-Type": "application/json" } });
   }) as typeof fetch;
-  const service = new SchoolRatingService("test-key", mockFetch);
+  const service = new SchoolRatingService("test-key", mockFetch, "");
   const property = {
     id: "p1", title: "1 Missing St, Athens, GA", price: 1, bedrooms: 1, bathrooms: 1, sqft: 1,
     location: "Athens, GA", features: [], url: "", listedAt: new Date().toISOString(), source: "test",
@@ -215,8 +239,30 @@ test("strict assignment mode does not spend Firecrawl calls on an address with n
 
   const enriched = await service.enrichProperty(property, "Athens, GA", { strictAssignment: true });
 
-  assert.equal(calls, 0);
+  assert.equal(calls, 1);
   assert.equal(enriched.schools?.length || 0, 0);
+});
+
+test("strict mode accepts complete ratings from an exact Realtor property result", async () => {
+  const mockFetch = (async () => new Response(JSON.stringify({ data: { web: [{
+    title: "1 Main St, Athens, GA 30606",
+    url: "https://www.realtor.com/realestateandhomes-detail/1-Main-St_Athens_GA_30606",
+    markdown: `Schools
+      8 10 8 out of 10 Example Elementary School Grades K-5
+      6 10 6 out of 10 Example Middle School Grades 6-8
+      5 10 5 out of 10 Example High School Grades 9-12`,
+  }] } }), { status: 200, headers: { "Content-Type": "application/json" } })) as typeof fetch;
+  const service = new SchoolRatingService("test-key", mockFetch, "");
+  const property = {
+    id: "p1", title: "1 Main St, Athens, GA 30606", price: 1, bedrooms: 1, bathrooms: 1, sqft: 1,
+    location: "Athens, GA 30606", features: [], url: "", listedAt: new Date().toISOString(), source: "test",
+  };
+
+  const enriched = await service.enrichProperty(property, "Athens, GA", { strictAssignment: true });
+
+  assert.deepEqual(enriched.schools?.map((school) => [school.type, school.rating, school.relationship]), [
+    ["elementary", 8, "listing-associated"], ["middle", 6, "listing-associated"], ["high", 5, "listing-associated"],
+  ]);
 });
 
 test("persists school ratings across service restarts", async () => {

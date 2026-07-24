@@ -1,6 +1,6 @@
 ﻿import { SearchCriteria, Property } from "../core/types";
 
-import { assessProperty, extractCoreListingMetrics, extractPropertyEvidence } from "../core/property-matcher";
+import { assessProperty, extractCoreListingMetrics, extractPropertyEvidence, propertyMatchesRequestedMarket } from "../core/property-matcher";
 import * as store from "../core/store";
 import type { UserSession } from "../core/types";
 import { geoValidationService } from "../services/geo-validation-service";
@@ -46,9 +46,7 @@ export class FirecrawlSkill {
       if (!props.length) return props;
       return props.filter((p: any) => {
         if (criteria.location) {
-          const w = criteria.location.replace(/\s+(priced|under|over|budget|max|min|million|thousand|k|dollars?).*$/i, "").trim().toLowerCase().split(/[\s,]+/).filter(x => x.length > 0);
-          const pl = p.location.toLowerCase();
-          if (!w.every(x => pl.includes(x))) return false;
+          if (!propertyMatchesRequestedMarket(p, criteria.location)) return false;
         }
         if (criteria.minPrice != null && p.price < criteria.minPrice) return false;
         if (criteria.maxPrice != null && p.price > criteria.maxPrice) return false;
@@ -233,7 +231,10 @@ export class FirecrawlSkill {
   private async finalizeComplexMatches(properties: Property[], criteria: SearchCriteria, enrich = true): Promise<Property[]> {
     const hasSchoolCriteria = criteria.schoolMinRating != null || criteria.schoolAtLeastOneRating != null;
     const resultLimit = this.maxResults;
-    let candidates = properties.slice(0, resultLimit).map(addCoreDataDiagnostic);
+    let candidates = properties
+      .filter((property) => !criteria.location || propertyMatchesRequestedMarket(property, criteria.location))
+      .slice(0, resultLimit)
+      .map(addCoreDataDiagnostic);
     const needsListingDetail = requiresListingDetail(criteria);
     // Realtor new-construction cards often report only full baths (for example,
     // "2 bath") while the builder/MLS record says "2 full + 1 half". Verify
@@ -289,11 +290,11 @@ export class FirecrawlSkill {
         const property = candidates[index];
         try {
           const url = property.url.startsWith("http") ? property.url : `https://www.realtor.com${property.url.startsWith("/") ? "" : "/"}${property.url}`;
-          // A Realtor page can exceed one million raw-HTML characters. For a
-          // school-only query the rendered markdown already contains the full
-          // Schools panel, so avoid requesting rawHtml and reduce 408/timeouts.
+          // School-only requests use a longer render timeout, while mixed
+          // evidence requests share one raw-HTML/markdown document.
           const schoolLight = isSchoolOnlyDetailRequest(criteria);
-          const detail = await this.scrapeDetail(url, schoolLight);
+          const freshEvidence = hasSchoolCriteria || Boolean(criteria.exteriorMaterials?.length || criteria.communityFeatures?.length);
+          const detail = await this.scrapeDetail(url, schoolLight, freshEvidence);
           let detailContent = `${detail.markdown}\n${detail.rawHtml}`;
           // Only resume an interactive session when the initial response is
           // missing a requested dynamic panel. One session expands all useful
@@ -332,8 +333,8 @@ export class FirecrawlSkill {
           if (hasSchoolCriteria && !isSchoolOnlyDetailRequest(criteria)) {
             try {
               const url = property.url.startsWith("http") ? property.url : `https://www.realtor.com${property.url.startsWith("/") ? "" : "/"}${property.url}`;
-              const schoolDetail = await this.scrapeDetail(url, true);
-              const enriched = extractPropertyEvidence(property, schoolDetail.markdown);
+              const schoolDetail = await this.scrapeDetail(url, true, true);
+              const enriched = extractPropertyEvidence(property, `${schoolDetail.markdown}\n${schoolDetail.rawHtml}`);
               const rated = (enriched.schools || []).filter((school) => school.rating != null).length;
               candidates[index] = addDiagnostic(enriched, "listing-detail", rated ? "success" : "warning",
                 rated ? `Full detail request failed, but the lightweight Schools panel fallback found ${rated} rating(s).`
@@ -439,24 +440,26 @@ export class FirecrawlSkill {
     return rankAssessedProperties(candidates, criteria);
   }
 
-  private async scrapeDetail(url: string, schoolLight = false): Promise<{ rawHtml: string; markdown: string; scrapeId?: string }> {
+  private async scrapeDetail(url: string, schoolLight = false, freshEvidence = false): Promise<{ rawHtml: string; markdown: string; scrapeId?: string }> {
     firecrawlRequestBudget.consume("listing detail page");
-    const response = await this.listingFetch("https://api.firecrawl.dev/v2/scrape", {
+    // The synchronous v1 endpoint consistently returns Realtor's full raw
+    // document. The v2 endpoint intermittently remains pending until our
+    // 75/105-second abort, which made evidence disappear after a restart.
+    const response = await this.listingFetch("https://api.firecrawl.dev/v1/scrape", {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${this.apiKey}` },
       body: JSON.stringify({
         url,
-        formats: schoolLight ? ["markdown"] : ["rawHtml", "markdown"],
+        // Embedded JSON contains complete Schools cards and collapsed listing
+        // facts that markdown can omit, so evidence mode always keeps both.
+        formats: ["rawHtml", "markdown"],
         onlyMainContent: false,
-        // Realtor's Schools panel is hydrated after the initial page shell.
-        // A cached scrape can permanently preserve the shell without those
-        // ratings, so school requests must wait for rendering and bypass the
-        // Firecrawl document cache. Ordinary detail requests remain cached.
-        waitFor: schoolLight ? 5000 : 0,
+        // A short render wait is enough for Realtor's server document while a
+        // one-hour cache avoids repeatedly launching an expensive browser job.
+        // Exact-address fallbacks still cover an incomplete cached document.
+        waitFor: schoolLight ? 3000 : freshEvidence ? 3000 : 0,
         timeout: schoolLight ? 90000 : 60000,
-        maxAge: schoolLight ? 0 : 604800000,
-        proxy: "auto",
-        location: { country: "US", languages: ["en-US"] },
+        maxAge: schoolLight || freshEvidence ? 3600000 : 604800000,
       }),
       signal: AbortSignal.timeout(schoolLight ? 105000 : 75000),
     });
@@ -946,7 +949,8 @@ export function resolveFirecrawlBudget(criteria: SearchCriteria, configured = pr
   // These floors are completeness guarantees, not merely defaults. An old
   // PowerShell value such as RE_FIRECRAWL_REQUEST_BUDGET=15 must not silently
   // disable detail enrichment for the later candidates in a 20-property run.
-  const minimum = hasSchoolCriteria ? 45 : 30;
+  const hasFeatureCriteria = Boolean(criteria.exteriorMaterials?.length || criteria.communityFeatures?.length);
+  const minimum = hasSchoolCriteria || hasFeatureCriteria ? 45 : 30;
   const requested = Number(configured);
   return Number.isFinite(requested) && requested > minimum ? Math.min(requested, 100) : minimum;
 }
@@ -1022,7 +1026,6 @@ export function selectCachedLiveProperties(
   limit = 20,
   now = Date.now(),
 ): Property[] {
-  const requestedTokens = normalizeLocationTokens(location);
   const seen = new Set<string>();
   const results: Property[] = [];
   const recent = [...sessions]
@@ -1032,8 +1035,7 @@ export function selectCachedLiveProperties(
   for (const session of recent) {
     for (const property of session.matchedProperties || []) {
       if (!/realtor(?:\.com)?/i.test(property.source || "") || /demo/i.test(property.source || "")) continue;
-      const haystack = `${property.location || ""} ${property.title || ""}`.toLowerCase();
-      if (requestedTokens.length && !requestedTokens.every((token) => haystack.includes(token))) continue;
+      if (!propertyMatchesRequestedMarket(property, location)) continue;
       const key = (property.url || `${property.title}|${property.location}`).trim().toLowerCase();
       if (!key || seen.has(key)) continue;
       seen.add(key);
@@ -1047,14 +1049,6 @@ export function selectCachedLiveProperties(
     }
   }
   return results;
-}
-
-function normalizeLocationTokens(location: string): string[] {
-  return location.toLowerCase()
-    .replace(/\s+(priced|under|over|budget|max|min|million|thousand|k|dollars?).*$/i, "")
-    .split(/[\s,]+/)
-    .map((token) => token.trim())
-    .filter(Boolean);
 }
 
 function clearDerivedMatch(property: Property): Property {

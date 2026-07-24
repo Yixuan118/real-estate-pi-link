@@ -57,7 +57,7 @@ export function extractSchoolEvidence(
   // Depending on the renderer/accessibility tree this can be either
   // "7 10 Burney-Harris-Lyons Middle School" or
   // "7 10 7 out of 10 Burney-Harris-Lyons Middle School".
-  const scoreFirstPattern = /\b(\d{1,2})\s*(?:\/\s*)?10\s+(?:\1\s+out\s+of\s+10\s+)?([A-Z][A-Za-z0-9'.&()\- ]{2,120}?(?:Elementary|Middle|High)(?:\s+School)?)\b/gi;
+  const scoreFirstPattern = /\b(\d{1,2})\s*(?:\/\s*)?10\s+(?:\1\s+out\s+of\s+10\s+)?\[?([A-Z][A-Za-z0-9'.&()\- ]{2,120}?(?:Elementary|Middle|High)(?:\s+School)?)\b\]?(?:\([^)\s]+(?:\s+"[^"]*")?\))?/gi;
   while ((match = scoreFirstPattern.exec(normalized)) !== null) {
     const name = cleanSchoolName(match[2]);
     const rating = validRating(match[1]);
@@ -135,7 +135,10 @@ export class SchoolRatingService {
     const hasOfficialSchools = schools.some((school) => school.relationship === "assigned" || school.relationship === "assignment-option");
     // In strict assignment mode, an address search can only return nearby schools
     // and therefore cannot repair a missing official assignment.
-    if (!hasOfficialSchools && !options.strictAssignment && (!schools.length || schools.some((school) => school.rating == null))) {
+    // An exact Realtor property result is still property-associated evidence in
+    // strict mode. It is not the same as a broad "schools near this address"
+    // search, which must remain nearby-only.
+    if (!hasOfficialSchools && (!schools.length || schools.some((school) => school.rating == null))) {
       const lookup = await this.searchByProperty(property.title, location || property.location);
       schools = mergeSchools(schools, lookup);
     }
@@ -154,14 +157,14 @@ export class SchoolRatingService {
   }
 
   async lookupSchool(name: string, location?: string): Promise<SchoolEvidence[]> {
-    return this.cached(`school:v3:${normalizeKey(name)}:${normalizeKey(location || "")}`, async () => {
+    return this.cached(`school:v4:${normalizeCacheKey(name)}:${normalizeCacheKey(location || "")}`, async () => {
       return this.searchExactSchool(name, location || "United States");
     });
   }
 
   private async searchByProperty(address: string, location: string): Promise<SchoolEvidence[]> {
-    return this.cached(`property:v3:${normalizeKey(address)}:${normalizeKey(location)}`, () =>
-      this.search(`"${address}" "${location}" schools "GreatSchools Rating"`));
+    return this.cached(`property:v4:${normalizeCacheKey(address)}:${normalizeCacheKey(location)}`, () =>
+      this.searchExactPropertyListing(address, location));
   }
 
   private async cached(key: string, producer: () => Promise<SchoolEvidence[]>): Promise<SchoolEvidence[]> {
@@ -184,12 +187,15 @@ export class SchoolRatingService {
     return promise;
   }
 
-  private async search(query: string): Promise<SchoolEvidence[]> {
+  private async searchExactPropertyListing(address: string, location: string): Promise<SchoolEvidence[]> {
     firecrawlRequestBudget.consume("property-address school search");
     const response = await this.fetchImpl("https://api.firecrawl.dev/v2/search", {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${this.apiKey}` },
-      body: JSON.stringify({ query, limit: 3, sources: ["web"], includeDomains: ["realtor.com"], country: "US", timeout: 30000 }),
+      body: JSON.stringify({
+        query: `"${address}" "${location}" schools "GreatSchools Rating"`,
+        limit: 3, sources: ["web"], includeDomains: ["realtor.com"], country: "US", timeout: 30000,
+      }),
       signal: AbortSignal.timeout(40000),
     });
     if (!response.ok) throw new Error(`Firecrawl school search HTTP ${response.status}`);
@@ -200,8 +206,9 @@ export class SchoolRatingService {
     for (const item of web) {
       const url = String(item.url || "");
       if (!/^https?:\/\/(?:www\.)?realtor\.com\//i.test(url)) continue;
+      if (!isExactPropertyResult(item, address)) continue;
       const content = [item.title, item.description, item.markdown].filter(Boolean).join("\n");
-      schools.push(...extractSchoolEvidence(content, url, "firecrawl-search"));
+      schools.push(...extractSchoolEvidence(content, url, "realtor-listing"));
     }
     return mergeSchools([], schools);
   }
@@ -286,6 +293,21 @@ export class SchoolRatingService {
     firecrawlRequestBudget.settle("dedicated school page fallback", payload.creditsUsed);
     return String(payload.data?.markdown || payload.data?.content || "");
   }
+}
+
+function isExactPropertyResult(item: any, address: string): boolean {
+  const normalizeAddress = (value: string) => value.toLowerCase()
+    .replace(/\b(?:unit|apt)\s+[^,]+/g, " ")
+    .replace(/[^a-z0-9]+/g, " ").trim();
+  const expected = normalizeAddress(address);
+  const expectedWithoutZip = expected.replace(/\s+\d{5}(?:\s+\d{4})?$/, "").trim();
+  const identities = [...new Set([expected, expectedWithoutZip].filter((value) => value.length >= 8))];
+  const title = normalizeAddress(String(item.title || ""));
+  let url = String(item.url || "");
+  try { url = decodeURIComponent(url); } catch { /* Preserve malformed URLs for conservative matching. */ }
+  const normalizedUrl = normalizeAddress(url);
+  return identities.some((identity) =>
+    title === identity || title.startsWith(`${identity} `) || normalizedUrl.includes(identity));
 }
 
 function isDedicatedSchoolPage(sourceUrl: string, schoolName: string | string[]): boolean {
@@ -583,6 +605,10 @@ export function extractGreatSchoolsRating(content: string): number | undefined {
 
 function normalizeKey(value: string): string {
   return value.toLowerCase().replace(/[^a-z0-9]+/g, " ").replace(/\broad\b/g, " ").replace(/\s+/g, " ").trim();
+}
+
+function normalizeCacheKey(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, " ").replace(/\s+/g, " ").trim();
 }
 
 function addOrMerge(target: Map<string, SchoolEvidence>, school: SchoolEvidence): void {
