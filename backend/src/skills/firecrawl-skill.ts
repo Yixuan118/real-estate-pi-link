@@ -192,7 +192,9 @@ export class FirecrawlSkill {
       if (!merged.has(key)) merged.set(key, property);
     };
     initial.forEach(add);
-    for (let page = 2; page <= pageLimit && applyFilters([...merged.values()]).length < target; page++) {
+    const featureDiscovery = Boolean(criteria.exteriorMaterials?.length || criteria.communityFeatures?.length);
+    for (let page = 2; page <= pageLimit
+      && (featureDiscovery || applyFilters([...merged.values()]).length < target); page++) {
       try {
         const data = await this.scrapeListingPage(`${baseUrl}/pg-${page}`);
         const raw = data?.data?.rawHtml || "";
@@ -231,7 +233,7 @@ export class FirecrawlSkill {
   private async finalizeComplexMatches(properties: Property[], criteria: SearchCriteria, enrich = true): Promise<Property[]> {
     const hasSchoolCriteria = criteria.schoolMinRating != null || criteria.schoolAtLeastOneRating != null;
     const resultLimit = this.maxResults;
-    let candidates = properties
+    let candidates = prioritizeCandidatesForCriteria(properties, criteria)
       .filter((property) => !criteria.location || propertyMatchesRequestedMarket(property, criteria.location))
       .slice(0, resultLimit)
       .map(addCoreDataDiagnostic);
@@ -661,7 +663,8 @@ export class FirecrawlSkill {
       }
       if (listings.length === 0) throw new Error("No listings found");
       console.log("[FirecrawlSkill] JSON-LD parsed:", listings.length, "listings");
-      for (let i = 0; i < listings.length && props.length < this.maxResults; i++) {
+      const candidateLimit = Math.max(this.maxResults, Math.min(Number(process.env.RE_LISTING_CANDIDATE_LIMIT || 60), 100));
+      for (let i = 0; i < listings.length && props.length < candidateLimit; i++) {
         const listing = listings[i];
         if (!listing || !listing["@type"]) continue;
         const me = listing.mainEntity || {};
@@ -925,6 +928,34 @@ function rankAssessedProperties(properties: Property[], criteria: SearchCriteria
       const statusDifference = statusOrder[a.criteriaMatch.overall] - statusOrder[b.criteriaMatch.overall];
       return statusDifference || b.criteriaMatch.score - a.criteriaMatch.score || a.price - b.price;
     });
+}
+
+export function prioritizeCandidatesForCriteria(properties: Property[], criteria: SearchCriteria): Property[] {
+  const needsLake = Boolean(criteria.communityFeatures?.some((item) => /lake|pond/i.test(item)));
+  const needsBrick = Boolean(criteria.exteriorMaterials?.some((item) => /brick/i.test(item)));
+  if (!needsLake && !needsBrick) return properties;
+  return properties.map((property, index) => {
+    const facts = Object.entries(property.listingFacts || {})
+      .flatMap(([label, values]) => [label, ...values]).join(" ");
+    const text = `${property.title} ${property.description || ""} ${property.features.join(" ")} ${facts}`;
+    let score = 0;
+    if (needsLake) {
+      if (property.communityFeatures?.some((item) => /lake|pond/i.test(item))) score += 100;
+      if (/\b(?:community features?|association amenities?|association fee includes?)\s*:[^.;]{0,240}\b(?:lake|pond)\b/i.test(text)
+          || /\b(?:community|neighborhood|subdivision|hoa|residents?)[^.;]{0,180}\b(?:lake|pond)\b/i.test(text)
+          || /\b(?:lake privileges?|shared lake access|community dock)\b/i.test(text)) score += 80;
+      // Address/name tokens are discovery hints only. The detail page must
+      // still provide explicit community evidence before the criterion passes.
+      if (/\b(?:lake|pond|water|waterfront|millstone|edgewater|shore|cove|marina)\b/i.test(property.title)) score += 20;
+      else if (/\b(?:lake|pond|waterfront)\b/i.test(property.description || "")) score += 10;
+    }
+    if (needsBrick) {
+      if (property.exteriorCoverage === "all-sides") score += 100;
+      if (/\b(?:four[- ]sided|4[- ]sided|all[- ]brick|brick\s*4\s*sides?)\b/i.test(text)) score += 80;
+      else if (/\bbrick\b/i.test(property.description || "")) score += 10;
+    }
+    return { property, index, score };
+  }).sort((a, b) => b.score - a.score || a.index - b.index).map(({ property }) => property);
 }
 
 export const firecrawlSkill = new FirecrawlSkill();

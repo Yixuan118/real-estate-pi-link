@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { defaultSearchCriteria, Property, UserSession } from "../core/types";
-import { detailNeedsInteractiveExpansion, extractInteractText, FirecrawlSkill, isSchoolOnlyDetailRequest, requiresListingDetail, resolveFirecrawlBudget, selectCachedLiveProperties, shouldVerifyBathroomsSeparately } from "./firecrawl-skill";
+import { detailNeedsInteractiveExpansion, extractInteractText, FirecrawlSkill, isSchoolOnlyDetailRequest, prioritizeCandidatesForCriteria, requiresListingDetail, resolveFirecrawlBudget, selectCachedLiveProperties, shouldVerifyBathroomsSeparately } from "./firecrawl-skill";
 
 test("caps the assessed result set at 20 properties", async () => {
   const properties: Property[] = Array.from({ length: 30 }, (_, index) => ({
@@ -22,6 +22,24 @@ test("caps the assessed result set at 20 properties", async () => {
 
   assert.equal(result.length, 20);
   assert.ok(result.every((property: Property) => property.criteriaMatch?.overall === "verified"));
+});
+
+test("community-lake searches prioritize likely discovery candidates before the 20-detail cap", () => {
+  const property = (id: string, title: string, description = ""): Property => ({
+    id, title, description, price: 400000, bedrooms: 3, bathrooms: 2, sqft: 1800,
+    location: "Athens, GA", features: [], url: "", listedAt: new Date().toISOString(), source: "test",
+  });
+  const generic = Array.from({ length: 25 }, (_, index) => property(`g${index}`, `${index + 1} Main St, Athens, GA`));
+  const candidates = [
+    ...generic,
+    property("lake-address", "1031 Founders Lake Dr, Athens, GA"),
+    property("lake-description", "353 Plain Dr, Athens, GA", "Neighborhood residents have access to a community lake."),
+  ];
+  const prioritized = prioritizeCandidatesForCriteria(candidates, {
+    ...defaultSearchCriteria(), location: "Athens, GA", communityFeatures: ["lake"],
+  });
+  assert.deepEqual(prioritized.slice(0, 2).map((item) => item.id), ["lake-description", "lake-address"]);
+  assert.equal(prioritized.length, candidates.length);
 });
 
 test("school evidence mode retains the full 20-candidate result set", async () => {
@@ -151,6 +169,44 @@ test("bounded pagination supplements a heavily filtered first page without mergi
   assert.equal(result.length, 12);
   assert.ok(result.some((property: Property) => property.title.includes("Unit 1")));
   assert.ok(result.some((property: Property) => property.title.includes("Unit 2")));
+});
+
+test("feature discovery checks all configured listing pages even when page one already has enough homes", async () => {
+  const requestedPages: string[] = [];
+  const listing = {
+    "@type": "RealEstateListing", name: "1031 Founders Lake Dr, Athens, GA 30606",
+    offers: { price: "850000" },
+    mainEntity: {
+      numberOfBedrooms: 4, numberOfBathrooms: 3, floorSize: { value: "3000" },
+      address: {
+        streetAddress: "1031 Founders Lake Dr", addressLocality: "Athens",
+        addressRegion: "GA", postalCode: "30606",
+      },
+    },
+  };
+  const raw = `<script data-testid="seoLinkingData">${JSON.stringify([{
+    "@type": "CollectionPage", mainEntity: { itemListElement: [listing] },
+  }])}</script>${"x".repeat(1200)}`;
+  const mockedFetch: typeof fetch = async (_input, init) => {
+    requestedPages.push(JSON.parse(String(init?.body)).url);
+    return new Response(JSON.stringify({ success: true, creditsUsed: 1, data: { rawHtml: raw, markdown: "" } }), {
+      status: 200, headers: { "Content-Type": "application/json" },
+    });
+  };
+  const initial: Property[] = Array.from({ length: 20 }, (_, index) => ({
+    id: `r${index}`, title: `${index + 1} Main St, Athens, GA 30606`, price: 300000 + index,
+    bedrooms: 3, bathrooms: 2, sqft: 1500, location: "Athens, GA 30606", features: [], url: "",
+    listedAt: new Date().toISOString(), source: "test",
+  }));
+  await (new FirecrawlSkill(mockedFetch) as any).supplementListingPages(
+    "https://www.realtor.com/realestateandhomes-search/athens_GA", initial,
+    { ...defaultSearchCriteria(), location: "Athens, GA", communityFeatures: ["lake"] },
+    (properties: Property[]) => properties,
+  );
+  assert.deepEqual(requestedPages, [
+    "https://www.realtor.com/realestateandhomes-search/athens_GA/pg-2",
+    "https://www.realtor.com/realestateandhomes-search/athens_GA/pg-3",
+  ]);
 });
 
 test("Realtor detail scraping is used by default for school and listing evidence", () => {
