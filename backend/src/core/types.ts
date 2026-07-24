@@ -78,7 +78,7 @@ export interface Property {
   featureEvidence?: Array<{
     criterion: "all-sides-brick" | "community-lake";
     sourceUrl: string;
-    source: "targeted-web-search";
+    source: "realtor-listing" | "targeted-web-search";
     checkedAt: string;
   }>;
   nearbyPlaces?: Array<{

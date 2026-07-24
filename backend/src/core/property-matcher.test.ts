@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { defaultSearchCriteria, Property } from "./types";
 import { regexExtract } from "./llm-service";
-import { assessProperty, extractCoreListingMetrics, extractListingFacts, extractPropertyEvidence, haversineMiles, propertyMatchesRequestedMarket } from "./property-matcher";
+import { assessProperty, extractCommunityWaterEvidence, extractCoreListingMetrics, extractListingFacts, extractPropertyEvidence, haversineMiles, propertyMatchesRequestedMarket } from "./property-matcher";
 
 test("uses full and half bathroom evidence instead of an incomplete summary count", () => {
   const metrics = extractCoreListingMetrics(
@@ -156,6 +156,33 @@ test("recognizes structured resident lake access but not an unrelated nearby lak
   assert.deepEqual(extractPropertyEvidence(base, "Association Amenities: Lake Access, Clubhouse").communityFeatures, ["lake"]);
   assert.deepEqual(extractPropertyEvidence(base, "Community Features: Private Pond, Sidewalks").communityFeatures, ["pond"]);
   assert.deepEqual(extractPropertyEvidence(base, "Lake Oconee is 28 miles away.").communityFeatures, []);
+});
+
+test("extracts Realtor collapsed community-lake JSON without letting unrelated pond tags replace lake", () => {
+  const raw = `<script>{"categories":[
+    {"category":"Homeowners Association","parent_category":"Community","text":[
+      "Association: Yes","Association Fee Includes: Maintenance Grounds"
+    ]},
+    {"category":"Amenities and Community Features","parent_category":"Community","text":[
+      "Community Features: Homeowners Assoc, Lake, Near Shopping, Playground, Pool"
+    ]}
+  ],"photo_tags":["pond"],"description":"A decorative pond appears in one photo."}</script>`;
+  const evidence = extractCommunityWaterEvidence(raw);
+  assert.deepEqual(evidence.features, ["lake"]);
+  assert.match(evidence.snippets.join(" "), /Community Features: Homeowners Assoc, Lake/);
+});
+
+test("accepts HOA lake rights and rejects lake views or nearby public lakes", () => {
+  assert.deepEqual(
+    extractCommunityWaterEvidence("Association Fee Includes: Lake/Pond, Common Area Maintenance").features,
+    ["lake", "pond"],
+  );
+  assert.deepEqual(
+    extractCommunityWaterEvidence("Waterfront and Water Access: Lake Privileges; Association: Yes").features,
+    ["lake"],
+  );
+  assert.deepEqual(extractCommunityWaterEvidence("View: Lake. Water Body Name: Lake Oconee.").features, []);
+  assert.deepEqual(extractCommunityWaterEvidence("Public lake located 0.4 miles away.").features, []);
 });
 
 test("strict requested-market matching rejects same-name cities, nearby cities, and foreign results", () => {

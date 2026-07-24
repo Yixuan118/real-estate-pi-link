@@ -46,6 +46,8 @@ export function extractPropertyEvidence(property: Property, content: string): Pr
   const lower = text.toLowerCase();
   const exteriorMaterials = new Set(property.exteriorMaterials || []);
   const communityFeatures = new Set(property.communityFeatures || []);
+  const originalCommunityWater = new Set([...communityFeatures].filter((item) => /lake|pond/i.test(item)));
+  const featureEvidence = [...(property.featureEvidence || [])];
   const nearbyPlaces = [...(property.nearbyPlaces || [])];
 
   if (/\b(?:four[- ]sided|4[- ]sided|all[- ]brick|brick\s*4\s*sides?|brick on (?:all|four) sides|full brick exterior)\b/i.test(text)
@@ -63,6 +65,22 @@ export function extractPropertyEvidence(property: Property, content: string): Pr
       || /\b(?:community features?|association amenities?|subdivision amenities?|neighborhood amenities?)\s*[:\-]\s*[^.;]{0,240}\b(?:lake|pond)\b/i.test(text)
       || /小区|社区/.test(text) && /湖|池塘/.test(text)) {
     communityFeatures.add(lower.includes("pond") || text.includes("池塘") ? "pond" : "lake");
+  }
+
+  // Replace the legacy page-wide guess above with field-level Realtor
+  // evidence. This prevents an unrelated photo tag such as "pond" from
+  // overriding an explicit "Community Features: Lake" MLS field.
+  const communityWater = extractCommunityWaterEvidence(content);
+  for (const existing of [...communityFeatures]) {
+    if (/lake|pond/i.test(existing) && !originalCommunityWater.has(existing)) communityFeatures.delete(existing);
+  }
+  for (const feature of communityWater.features) communityFeatures.add(feature);
+  if (communityWater.features.length && property.url
+      && !featureEvidence.some((item) => item.criterion === "community-lake" && item.sourceUrl === property.url)) {
+    featureEvidence.push({
+      criterion: "community-lake", sourceUrl: property.url, source: "realtor-listing",
+      checkedAt: new Date().toISOString(),
+    });
   }
 
   extractNearbyDistances(text).forEach((place) => {
@@ -98,9 +116,66 @@ export function extractPropertyEvidence(property: Property, content: string): Pr
     exteriorMaterials: [...exteriorMaterials],
     exteriorCoverage: property.exteriorCoverage || "unknown",
     communityFeatures: [...communityFeatures],
+    featureEvidence,
     nearbyPlaces,
     schools,
   };
+}
+
+export function extractCommunityWaterEvidence(content: string): {
+  features: Array<"lake" | "pond">;
+  snippets: string[];
+} {
+  const decoded = content
+    .replace(/\\u0022|\\"/g, '"')
+    .replace(/\\u0026/g, "&")
+    .replace(/&quot;/gi, '"')
+    .replace(/&amp;/gi, "&")
+    .replace(/\\n|\\r|\\t/g, " ");
+  const snippets: string[] = [];
+  const add = (value: string) => {
+    const clean = value.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+    if (clean && !snippets.includes(clean)) snippets.push(clean.slice(0, 600));
+  };
+
+  // Realtor stores collapsed Property details as category/text JSON. These
+  // fields are stronger than arbitrary "lake" mentions elsewhere on the page.
+  const categoryPattern = /"category"\s*:\s*"(Amenities and Community Features|Homeowners Association|Waterfront and Water Access)"[\s\S]{0,2500}?"text"\s*:\s*\[([\s\S]{0,2500}?)\]/gi;
+  let category: RegExpExecArray | null;
+  while ((category = categoryPattern.exec(decoded)) !== null) {
+    const section = category[1];
+    const values = [...category[2].matchAll(/"([^"]{2,500})"/g)].map((match) => match[1]);
+    for (const value of values) {
+      const structuredCommunityField = /^(?:Community Features?|Association Amenities?|Association Fee Includes?|Subdivision Amenities?|Neighborhood Amenities?)\s*:/i.test(value);
+      const sharedLakeAccess = section === "Waterfront and Water Access"
+        && /\b(?:lake privileges?|shared(?:-private)? lake access|community (?:lake|dock)|lake access rights?)\b/i.test(value);
+      if ((structuredCommunityField && /\b(?:lake|pond)\b/i.test(value)) || sharedLakeAccess) {
+        add(`${section}: ${value}`);
+      }
+    }
+  }
+
+  // Markdown and rendered text may expose the same fields without JSON.
+  const structuredPattern = /\b(?:Community Features?|Association Amenities?|Association Fee Includes?|Subdivision Amenities?|Neighborhood Amenities?)\s*:\s*[^.;\n<]{0,500}\b(?:lake|pond)\b[^.;\n<]{0,250}/gi;
+  for (const match of decoded.matchAll(structuredPattern)) add(match[0]);
+  const privilegesPattern = /\b(?:lake privileges?|shared(?:-private)? lake access|community (?:lake|dock)|lake access rights?)\b[^.;\n<]{0,250}/gi;
+  for (const match of decoded.matchAll(privilegesPattern)) add(match[0]);
+
+  // Prose counts only when water is explicitly tied to the neighborhood, HOA,
+  // residents, common area, or shared access.
+  const prosePatterns = [
+    /\b(?:community|neighborhood|subdivision|hoa|association|amenit(?:y|ies)|residents?|common areas?|shared)[^.;\n<]{0,220}\b(?:lake|pond)\b[^.;\n<]{0,180}/gi,
+    /\b(?:lake|pond)\b[^.;\n<]{0,220}\b(?:community|neighborhood|subdivision|hoa|association|amenit(?:y|ies)|residents?|resident access|privileges?|common areas?|shared|maintained)\b[^.;\n<]{0,120}/gi,
+  ];
+  for (const pattern of prosePatterns) {
+    for (const match of decoded.matchAll(pattern)) add(match[0]);
+  }
+
+  const joined = snippets.join("\n");
+  const features: Array<"lake" | "pond"> = [];
+  if (/\blake\b/i.test(joined)) features.push("lake");
+  if (/\bpond\b/i.test(joined)) features.push("pond");
+  return { features, snippets };
 }
 
 export function extractCoreListingMetrics(

@@ -89,7 +89,9 @@ export class ListingEvidenceSearchService {
   private async searchAddress(address: string, needsBrick: boolean, needsLake: boolean): Promise<{ content: string; urls: string[] }> {
     const terms = [
       needsBrick ? '"four-sided brick" "all brick exterior"' : "",
-      needsLake ? '"community lake" "neighborhood lake" "subdivision lake"' : "",
+      needsLake
+        ? '("Community Features: Lake" OR "Association Amenities: Lake" OR "Association Fee Includes: Lake/Pond" OR "Lake Privileges" OR "community lake" OR "neighborhood lake")'
+        : "",
     ].filter(Boolean).join(" ");
     firecrawlRequestBudget.consume("targeted listing evidence search");
     const response = await this.fetchImpl("https://api.firecrawl.dev/v2/search", {
