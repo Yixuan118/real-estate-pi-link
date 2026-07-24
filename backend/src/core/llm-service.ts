@@ -1,13 +1,14 @@
 ﻿import { SearchCriteria, defaultSearchCriteria, ConversationEntry } from "./types";
 
 import { normalizeDistanceConstraint } from "./property-matcher";
+import { DEFAULT_LLM_MODEL } from "../config";
 
 // DeepSeek / OpenAI compatible LLM service
 // The LLM acts as an intelligent real estate assistant (sub-agent pattern)
 
 const DEEPSEEK_KEY = process.env.DEEPSEEK_API_KEY || "";
 const OPENAI_KEY = process.env.OPENAI_API_KEY || process.env.RE_OPENAI_KEY || "";
-const MODEL = process.env.RE_LLM_MODEL || "deepseek-chat";
+const MODEL = process.env.RE_LLM_MODEL || DEFAULT_LLM_MODEL;
 const API_BASE = process.env.RE_LLM_BASE_URL || "https://api.deepseek.com";
 const API_KEY = DEEPSEEK_KEY || OPENAI_KEY;
 

@@ -12,6 +12,8 @@ services:
         value: "20"
       - key: PI_RUNTIME_ENABLED
         value: "true"
+      - key: RE_LLM_MODEL
+        value: deepseek-v4-flash
       - key: RE_MAP_PROVIDER
         value: here
       - key: RE_GEO_DISTANCE_MODE

@@ -2,6 +2,7 @@
 import * as path from "node:path";
 import { existsSync, readFileSync } from "node:fs";
 import { Property, SearchCriteria } from "../core/types";
+import { DEFAULT_LLM_MODEL } from "../config";
 
 
 export interface PiAgentActivity {
@@ -185,7 +186,7 @@ class PiRuntimeService {
   }
 private async callLLM(prompt: string): Promise<string> {
     const apiKey = process.env.DEEPSEEK_API_KEY || "";
-    const model = process.env.RE_LLM_MODEL || "deepseek-chat";
+    const model = process.env.RE_LLM_MODEL || DEFAULT_LLM_MODEL;
     const baseUrl = process.env.RE_LLM_BASE_URL || "https://api.deepseek.com";
     if (!apiKey) throw new Error("No DEEPSEEK_API_KEY configured");
     const response = await fetch(baseUrl + "/chat/completions", {
