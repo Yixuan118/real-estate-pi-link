@@ -98,14 +98,14 @@ export function extractSchoolEvidence(
   const nearbySentencePattern = /(?:the\s+)?schools?\s+near\s+.{1,240}?\s+include\s+([\s\S]{1,1800}?)(?=\bNearby\s+Cities\b|\bNearby\s+Neighborhoods\b|\bSimilar\s+Homes\b|$)/gi;
   while ((match = nearbySentencePattern.exec(normalized)) !== null) {
     const linkedSchools = match[1];
-    const linkPattern = /\[([^\]]{3,160}?(?:Elementary|Middle|High)(?:\s+School)?)\]\(https?:\/\/(?:www\.)?realtor\.com\/local\/schools\/[^)]+\)/gi;
+    const linkPattern = /\[([^\]]{3,160}?(?:Elementary|Middle|High)(?:\s+School)?)\]\((https?:\/\/(?:www\.)?realtor\.com\/local\/schools\/[^)\s]+)\)/gi;
     let link: RegExpExecArray | null;
     while ((link = linkPattern.exec(linkedSchools)) !== null) {
       const name = cleanSchoolName(link[1]);
       if (!name) continue;
       addOrMerge(found, {
         name, scale: 10, type: inferSchoolType(name, ""), ratingSource: "unknown",
-        evidenceSource: "realtor-listing", sourceUrl, relationship: "listing-associated",
+        evidenceSource: "realtor-listing", sourceUrl: link[2], relationship: "listing-associated",
         assignmentSource: "realtor-listing", assignmentSourceUrl: sourceUrl,
         checkedAt: new Date().toISOString(),
       });
@@ -138,14 +138,18 @@ export class SchoolRatingService {
     // An exact Realtor property result is still property-associated evidence in
     // strict mode. It is not the same as a broad "schools near this address"
     // search, which must remain nearby-only.
-    if (!hasOfficialSchools && (!schools.length || schools.some((school) => school.rating == null))) {
+    const hasLinkedRealtorSchools = schools.some((school) =>
+      school.relationship === "listing-associated" && isRealtorSchoolUrl(school.sourceUrl));
+    if (!hasOfficialSchools && !hasLinkedRealtorSchools
+        && (!schools.length || schools.some((school) => school.rating == null))) {
       const lookup = await this.searchByProperty(property.title, location || property.location);
       schools = mergeSchools(schools, lookup);
     }
 
     const missing = schools.filter((school) => school.rating == null).slice(0, 6);
     if (missing.length) {
-      const resolved = await Promise.allSettled(missing.map((school) => this.lookupSchool(school.name, location || property.location)));
+      const resolved = await Promise.allSettled(missing.map((school) =>
+        this.lookupAssociatedSchool(school, location || property.location)));
       const successful = resolved.flatMap((result) => result.status === "fulfilled" ? result.value : []);
       schools = mergeSchools(schools, successful);
       if (!successful.length) {
@@ -159,6 +163,23 @@ export class SchoolRatingService {
   async lookupSchool(name: string, location?: string): Promise<SchoolEvidence[]> {
     return this.cached(`school:v4:${normalizeCacheKey(name)}:${normalizeCacheKey(location || "")}`, async () => {
       return this.searchExactSchool(name, location || "United States");
+    });
+  }
+
+  private async lookupAssociatedSchool(school: SchoolEvidence, location: string): Promise<SchoolEvidence[]> {
+    if (!isRealtorSchoolUrl(school.sourceUrl)) return this.lookupSchool(school.name, location);
+    return this.cached(`realtor-school:v1:${normalizeCacheKey(school.sourceUrl)}`, async () => {
+      const content = await this.scrapeDedicatedSchoolPage(school.sourceUrl);
+      const rating = extractTargetSchoolRating(content, school.name);
+      if (rating == null) return [];
+      return [{
+        ...school,
+        rating,
+        ratingSource: "GreatSchools",
+        evidenceSource: "realtor-school-page",
+        sourceUrl: school.sourceUrl,
+        checkedAt: new Date().toISOString(),
+      }];
     });
   }
 
@@ -644,6 +665,10 @@ function mergeSchools(current: SchoolEvidence[], incoming: SchoolEvidence[]): Sc
   current.forEach((school) => addOrMerge(merged, school));
   incoming.forEach((school) => addOrMerge(merged, school));
   return [...merged.values()];
+}
+
+function isRealtorSchoolUrl(value: string): boolean {
+  return /^https?:\/\/(?:www\.)?realtor\.com\/local\/schools\/[^/?#]+/i.test(value);
 }
 
 export const schoolRatingService = new SchoolRatingService();

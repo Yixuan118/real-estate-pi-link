@@ -77,6 +77,50 @@ test("extracts property-associated schools from Realtor's server-rendered nearby
     ["Cedar Shoals High School", "high", "listing-associated"],
     ["Hilsman Middle School", "middle", "listing-associated"],
   ]);
+  assert.deepEqual(schools.map((school) => school.sourceUrl), [
+    "https://www.realtor.com/local/schools/Whit-Davis-Road-Elementary-School-0718577561",
+    "https://www.realtor.com/local/schools/Cedar-Shoals-High-School-0718577431",
+    "https://www.realtor.com/local/schools/Hilsman-Middle-School-0718577401",
+  ]);
+  assert.ok(schools.every((school) => school.assignmentSourceUrl === "https://www.realtor.com/example"));
+});
+
+test("uses property-linked Realtor school pages without a broad school search", async () => {
+  const requestedUrls: string[] = [];
+  const mockFetch = (async (input: string | URL, init?: RequestInit) => {
+    assert.match(String(input), /\/v2\/scrape$/);
+    const body = JSON.parse(String(init?.body || "{}"));
+    requestedUrls.push(body.url);
+    const rating = /Elementary/.test(body.url) ? 7 : /Middle/.test(body.url) ? 4 : 5;
+    const name = /Elementary/.test(body.url)
+      ? "Timothy Elementary School"
+      : /Middle/.test(body.url) ? "Clarke Middle School" : "Clarke Central High School";
+    return new Response(JSON.stringify({
+      data: { markdown: `# ${name}\n${rating} out of 10\nGreatSchools Rating\nParent Rating` },
+    }), { status: 200, headers: { "Content-Type": "application/json" } });
+  }) as typeof fetch;
+  const listingUrl = "https://www.realtor.com/realestateandhomes-detail/320-Kings-Rd";
+  const schools = extractSchoolEvidence(`The schools near 320 Kings Rd include
+    [Timothy Elementary School](https://www.realtor.com/local/schools/Timothy-Elementary-School-1),
+    [Clarke Middle School](https://www.realtor.com/local/schools/Clarke-Middle-School-2) and
+    [Clarke Central High School](https://www.realtor.com/local/schools/Clarke-Central-High-School-3).
+    Nearby Cities`, listingUrl);
+  const property = {
+    id: "p1", title: "320 Kings Rd, Athens, GA 30606", price: 375000, bedrooms: 4, bathrooms: 2, sqft: 1985,
+    location: "Athens, GA 30606", features: [], url: listingUrl, listedAt: new Date().toISOString(),
+    source: "realtor.com", schools,
+  };
+
+  const result = await new SchoolRatingService("test-key", mockFetch, "")
+    .enrichProperty(property, "Athens, GA", { strictAssignment: true });
+
+  assert.deepEqual(result.schools?.map((school) => [school.name, school.rating, school.relationship]), [
+    ["Timothy Elementary School", 7, "listing-associated"],
+    ["Clarke Middle School", 4, "listing-associated"],
+    ["Clarke Central High School", 5, "listing-associated"],
+  ]);
+  assert.equal(requestedUrls.length, 3);
+  assert.ok(requestedUrls.every((url) => /realtor\.com\/local\/schools\//.test(url)));
 });
 
 test("recursively extracts complete schools from nested Realtor page JSON", () => {
