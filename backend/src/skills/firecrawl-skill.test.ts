@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { defaultSearchCriteria, Property, UserSession } from "../core/types";
-import { detailNeedsInteractiveExpansion, extractInteractText, FirecrawlSkill, isSchoolOnlyDetailRequest, prioritizeCandidatesForCriteria, requiresListingDetail, resolveFeatureEnrichmentLimit, resolveFirecrawlBudget, selectCachedLiveProperties, shouldUseCachedMarket, shouldVerifyBathroomsSeparately } from "./firecrawl-skill";
+import { detailNeedsInteractiveExpansion, extractInteractText, FirecrawlSkill, isSchoolOnlyDetailRequest, prepareDetailEvidenceContent, prioritizeCandidatesForCriteria, requiresListingDetail, resolveFeatureEnrichmentLimit, resolveFirecrawlBudget, selectCachedLiveProperties, shouldUseCachedMarket, shouldVerifyBathroomsSeparately } from "./firecrawl-skill";
 
 test("caps the assessed result set at 20 properties", async () => {
   const properties: Property[] = Array.from({ length: 30 }, (_, index) => ({
@@ -60,6 +60,19 @@ test("feature-only searches deeply verify the ten most relevant candidates", () 
   assert.equal(resolveFeatureEnrichmentLimit(lake, "6"), 6);
   assert.equal(resolveFeatureEnrichmentLimit({ ...lake, schoolMinRating: 5 }, "20"), 20);
   assert.equal(resolveFeatureEnrichmentLimit({ ...defaultSearchCriteria(), location: "Athens, GA" }, "20"), 20);
+});
+
+test("large Realtor documents are reduced to bounded evidence windows without losing collapsed lake facts", () => {
+  const collapsedLake = JSON.stringify({
+    category: "Amenities and Community Features",
+    parent_category: "Community",
+    text: ["Community Features: Gated, Lake, Pool, Sidewalks"],
+  });
+  const raw = `<html>${"x".repeat(350_000)}${collapsedLake}${"y".repeat(350_000)}</html>`;
+  const criteria = { ...defaultSearchCriteria(), location: "Athens, GA", communityFeatures: ["lake"] };
+  const prepared = prepareDetailEvidenceContent("Property details for 125 Wood Lake Dr.", raw, criteria, "125 Wood Lake Dr, Athens, GA");
+  assert.ok(prepared.length < raw.length / 2);
+  assert.match(prepared, /Community Features: Gated, Lake, Pool/);
 });
 
 test("school evidence mode retains the full 20-candidate result set", async () => {

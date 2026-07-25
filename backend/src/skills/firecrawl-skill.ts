@@ -303,6 +303,7 @@ export class FirecrawlSkill {
           const freshEvidence = hasSchoolCriteria || Boolean(criteria.exteriorMaterials?.length || criteria.communityFeatures?.length);
           const detail = await this.scrapeDetail(url, schoolLight, freshEvidence);
           let detailContent = `${detail.markdown}\n${detail.rawHtml}`;
+          let supplementalDetail = "";
           // Only resume an interactive session when the initial response is
           // missing a requested dynamic panel. One session expands all useful
           // school/community tabs so this is not a request per accordion.
@@ -320,9 +321,20 @@ export class FirecrawlSkill {
               return "";
             });
             if (hasSchoolCriteria) console.log(`[SchoolPanel] ${property.id}: interaction returned ${expanded.length} character(s)`);
-            if (expanded) detailContent = `${detailContent}\n${expanded}`;
+            if (expanded) {
+              supplementalDetail = expanded;
+              detailContent = `${detailContent}\n${expanded}`;
+            }
           }
-          const enriched = extractPropertyEvidence(property, detailContent);
+          const evidenceContent = prepareDetailEvidenceContent(
+            `${detail.markdown}\n${supplementalDetail}`,
+            detail.rawHtml,
+            criteria,
+            property.title,
+          );
+          await new Promise<void>((resolve) => setImmediate(resolve));
+          const enriched = extractPropertyEvidence(property, evidenceContent);
+          await new Promise<void>((resolve) => setImmediate(resolve));
           if (hasSchoolCriteria) {
             const ratedSchools = (enriched.schools || []).filter((school) => school.rating != null);
             console.log(`[SchoolPanel] ${property.id}: ${(enriched.schools || []).length} associated school link(s), ${ratedSchools.length} inline rating(s), stages=${[...new Set((enriched.schools || []).map((school) => school.type))].join("/") || "none"}`);
@@ -341,7 +353,9 @@ export class FirecrawlSkill {
             try {
               const url = property.url.startsWith("http") ? property.url : `https://www.realtor.com${property.url.startsWith("/") ? "" : "/"}${property.url}`;
               const schoolDetail = await this.scrapeDetail(url, true, true);
-              const enriched = extractPropertyEvidence(property, `${schoolDetail.markdown}\n${schoolDetail.rawHtml}`);
+              const enriched = extractPropertyEvidence(property, prepareDetailEvidenceContent(
+                schoolDetail.markdown, schoolDetail.rawHtml, criteria, property.title,
+              ));
               const rated = (enriched.schools || []).filter((school) => school.rating != null).length;
               candidates[index] = addDiagnostic(enriched, "listing-detail", rated ? "success" : "warning",
                 rated ? `Full detail request failed, but the lightweight Schools panel fallback found ${rated} rating(s).`
@@ -965,6 +979,49 @@ export function prioritizeCandidatesForCriteria(properties: Property[], criteria
 
 export function shouldUseCachedMarket(criteria: SearchCriteria): boolean {
   return !criteria.exteriorMaterials?.length && !criteria.communityFeatures?.length;
+}
+
+export function prepareDetailEvidenceContent(
+  markdown: string,
+  rawHtml: string,
+  criteria: SearchCriteria,
+  propertyTitle = "",
+): string {
+  if (rawHtml.length <= 300_000) return `${markdown}\n${rawHtml}`;
+
+  const chunks: string[] = [markdown.slice(0, 160_000), rawHtml.slice(0, 30_000)];
+  const needles = new Set<string>([
+    propertyTitle.split(",")[0].trim(),
+    '"category"', "property details", "listing details", "source neighborhood",
+    "subdivision", "homeowners association", "association amenities",
+  ].filter(Boolean).map((value) => value.toLowerCase()));
+  if (criteria.communityFeatures?.some((item) => /lake|pond/i.test(item))) {
+    ["amenities and community features", "community features", "waterfront and water access",
+      "lake", "pond", "resident access", "lake privileges"].forEach((value) => needles.add(value));
+  }
+  if (criteria.exteriorMaterials?.some((item) => /brick/i.test(item))) {
+    ["building and construction", "exterior", "brick", "four-sided", "4-sided"].forEach((value) => needles.add(value));
+  }
+  if (criteria.schoolMinRating != null || criteria.schoolAtLeastOneRating != null) {
+    ["neighborhood & schools", "nearby schools", "greatschools", "elementary school",
+      "middle school", "high school", "out of 10"].forEach((value) => needles.add(value));
+  }
+
+  const lower = rawHtml.toLowerCase();
+  let windows = 0;
+  for (const needle of needles) {
+    let from = 0;
+    while (windows < 36) {
+      const index = lower.indexOf(needle, from);
+      if (index < 0) break;
+      chunks.push(rawHtml.slice(Math.max(0, index - 2500), Math.min(rawHtml.length, index + 7500)));
+      windows += 1;
+      from = index + needle.length;
+    }
+    if (windows >= 36) break;
+  }
+  chunks.push(rawHtml.slice(-15_000));
+  return chunks.join("\n");
 }
 
 export function resolveFeatureEnrichmentLimit(criteria: SearchCriteria, configured?: string): number {
