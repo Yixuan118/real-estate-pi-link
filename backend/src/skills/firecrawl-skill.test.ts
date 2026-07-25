@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { defaultSearchCriteria, Property, UserSession } from "../core/types";
-import { detailNeedsInteractiveExpansion, extractInteractText, FirecrawlSkill, isSchoolOnlyDetailRequest, prepareDetailEvidenceContent, prioritizeCandidatesForCriteria, requiresListingDetail, resolveFeatureEnrichmentLimit, resolveFirecrawlBudget, selectCachedLiveProperties, shouldUseCachedMarket, shouldVerifyBathroomsSeparately } from "./firecrawl-skill";
+import { detailNeedsInteractiveExpansion, extractInteractText, FirecrawlSkill, isSchoolOnlyDetailRequest, prepareDetailEvidenceContent, prepareSearchPagePropertyEvidence, prioritizeCandidatesForCriteria, requiresListingDetail, resolveFeatureEnrichmentLimit, resolveFirecrawlBudget, selectCachedLiveProperties, shouldUseCachedMarket, shouldVerifyBathroomsSeparately } from "./firecrawl-skill";
 
 test("caps the assessed result set at 20 properties", async () => {
   const properties: Property[] = Array.from({ length: 30 }, (_, index) => ({
@@ -167,6 +167,21 @@ test("structured living area accepts comma-formatted values without confusing lo
   const result = (new FirecrawlSkill() as any).parsePropertiesFromHtml(raw, defaultSearchCriteria(), "");
   assert.equal(result[0].sqft, 1809);
   assert.equal(result[0].sqftSource, "structured-data");
+});
+
+test("large Realtor search pages are reduced to bounded per-property evidence windows", () => {
+  const content = [
+    "x".repeat(600_000),
+    "153 Ponderosa Dr, Athens, GA 30605 beds 2 baths 2.5 sqft square feet 1,570",
+    "y".repeat(600_000),
+  ].join(" ");
+  const evidence = prepareSearchPagePropertyEvidence(
+    content,
+    "153 Ponderosa Dr, Athens, GA 30605",
+    299000,
+  );
+  assert.ok(evidence.length < 20_000);
+  assert.match(evidence, /beds 2 baths 2\.5/);
 });
 
 test("bounded pagination supplements a heavily filtered first page without merging distinct units", async () => {

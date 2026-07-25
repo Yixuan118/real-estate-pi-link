@@ -94,6 +94,7 @@ export class FirecrawlSkill {
         if (raw.length > 1000) {const md = data.data.markdown || data.data.content || "";
           console.log("[FirecrawlSkill] Got rawHtml:", raw.length, "chars");
           let fromHtml = this.parsePropertiesFromHtml(raw, criteria, md);
+          await yieldToEventLoop();
           if (fromHtml.length > 0) {
             if (page === 1) fromHtml = await this.supplementListingPages(targetUrl, fromHtml, criteria, applyFilters);
             console.log("[FirecrawlSkill] Extracted", fromHtml.length, "properties from JSON-LD");
@@ -206,6 +207,7 @@ export class FirecrawlSkill {
         const markdown = data?.data?.markdown || data?.data?.content || "";
         if (raw.length < 1000) break;
         const parsed = this.parsePropertiesFromHtml(raw, criteria, markdown);
+        await yieldToEventLoop();
         if (!parsed.length) break;
         parsed.forEach(add);
       } catch (error) {
@@ -725,12 +727,19 @@ export class FirecrawlSkill {
 
 
   private enrichBathroomsFromMarkdown(props: Property[], markdown: string): void {
-    const lines = markdown.split("\n").map(l => l.trim());
+    // Search responses can exceed 1 MB. Normalizing and regex-scanning the
+    // entire response once per listing blocked Render's event loop long enough
+    // to fail health checks. Normalize once, then inspect only bounded windows
+    // around each property's address/price.
+    const normalized = markdown.replace(/\s+/g, " ");
+    const lower = normalized.toLowerCase();
     for (const prop of props) {
+      const propertyEvidence = propertyEvidenceFromNormalizedSearchPage(normalized, lower, prop.title, prop.price);
+      const lines = propertyEvidence.split("\n").map(l => l.trim());
       // Realtor's rendered search payload commonly uses label-first text such
       // as "beds 2 baths 2 sqft square feet 1,570". Match it inside the exact
       // address window before falling back to the older price-card heuristic.
-      const metrics = extractCoreListingMetrics(markdown, prop.title);
+      const metrics = extractCoreListingMetrics(propertyEvidence, prop.title);
       if (metrics.bedrooms != null) prop.bedrooms = metrics.bedrooms;
       if (metrics.bathrooms != null) prop.bathrooms = metrics.bathrooms;
       if (metrics.fullBathrooms != null) prop.fullBathrooms = metrics.fullBathrooms;
@@ -739,7 +748,7 @@ export class FirecrawlSkill {
         prop.sqft = metrics.sqft;
         prop.sqftSource = metrics.sqftSource;
       }
-      if (hasNewConstructionEvidence(markdown, prop.title)
+      if (hasNewConstructionEvidence(propertyEvidence, prop.title)
           && !prop.features.some((feature) => /new construction/i.test(feature))) {
         prop.features.push("new construction");
       }
@@ -750,8 +759,8 @@ export class FirecrawlSkill {
         if (!lines[i].includes(priceStr)) continue;
         let addrConfirmed = true;
         if (streetPart.length >= 3) {
-          addrConfirmed = false;
-          for (let j = i + 1; j < Math.min(lines.length, i + 40); j++) {
+          addrConfirmed = lines[i].toLowerCase().includes(streetPart);
+          for (let j = i + 1; !addrConfirmed && j < Math.min(lines.length, i + 40); j++) {
             if (lines[j].toLowerCase().includes(streetPart)) { addrConfirmed = true; break; }
             if (/^\$[\d,]+/.test(lines[j]) && !lines[j].includes(priceStr)) break;
           }
@@ -979,6 +988,57 @@ export function prioritizeCandidatesForCriteria(properties: Property[], criteria
 
 export function shouldUseCachedMarket(criteria: SearchCriteria): boolean {
   return !criteria.exteriorMaterials?.length && !criteria.communityFeatures?.length;
+}
+
+export function prepareSearchPagePropertyEvidence(
+  content: string,
+  propertyTitle: string,
+  price = 0,
+): string {
+  const normalized = content.replace(/\s+/g, " ");
+  return propertyEvidenceFromNormalizedSearchPage(
+    normalized,
+    normalized.toLowerCase(),
+    propertyTitle,
+    price,
+  );
+}
+
+function propertyEvidenceFromNormalizedSearchPage(
+  normalized: string,
+  lower: string,
+  propertyTitle: string,
+  price: number,
+): string {
+  const address = propertyTitle.split(",")[0].trim().toLowerCase();
+  const needles = [
+    address,
+    price > 0 ? `$${price.toLocaleString("en-US")}`.toLowerCase() : "",
+    price > 0 ? `"price":"${price}"` : "",
+    price > 0 ? `"price":${price}` : "",
+  ].filter((needle, index, all) => needle && all.indexOf(needle) === index);
+  const ranges: Array<[number, number]> = [];
+
+  for (const needle of needles) {
+    let from = 0;
+    for (let occurrence = 0; occurrence < 8; occurrence++) {
+      const index = lower.indexOf(needle, from);
+      if (index < 0) break;
+      const start = Math.max(0, index - 320);
+      const end = Math.min(normalized.length, index + Math.max(needle.length, 1) + 1200);
+      if (!ranges.some(([existingStart, existingEnd]) => start <= existingEnd && end >= existingStart)) {
+        ranges.push([start, end]);
+      }
+      from = index + needle.length;
+    }
+  }
+
+  if (!ranges.length) return normalized.slice(0, 5000);
+  return ranges
+    .sort(([left], [right]) => left - right)
+    .slice(0, 10)
+    .map(([start, end]) => normalized.slice(start, end))
+    .join("\n");
 }
 
 export function prepareDetailEvidenceContent(
@@ -1294,4 +1354,8 @@ async function mapWithConcurrency<T>(items: T[], concurrency: number, worker: (i
 
 function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+function yieldToEventLoop(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
 }
