@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { defaultSearchCriteria, Property, UserSession } from "../core/types";
-import { detailNeedsInteractiveExpansion, extractInteractText, FirecrawlSkill, isSchoolOnlyDetailRequest, prioritizeCandidatesForCriteria, requiresListingDetail, resolveFirecrawlBudget, selectCachedLiveProperties, shouldVerifyBathroomsSeparately } from "./firecrawl-skill";
+import { detailNeedsInteractiveExpansion, extractInteractText, FirecrawlSkill, isSchoolOnlyDetailRequest, prioritizeCandidatesForCriteria, requiresListingDetail, resolveFeatureEnrichmentLimit, resolveFirecrawlBudget, selectCachedLiveProperties, shouldUseCachedMarket, shouldVerifyBathroomsSeparately } from "./firecrawl-skill";
 
 test("caps the assessed result set at 20 properties", async () => {
   const properties: Property[] = Array.from({ length: 30 }, (_, index) => ({
@@ -42,6 +42,26 @@ test("community-lake searches prioritize likely discovery candidates before the 
   assert.equal(prioritized.length, candidates.length);
 });
 
+test("feature searches bypass a first-page market cache so pagination discovery still runs", () => {
+  assert.equal(shouldUseCachedMarket({
+    ...defaultSearchCriteria(), location: "Athens, GA",
+  }), true);
+  assert.equal(shouldUseCachedMarket({
+    ...defaultSearchCriteria(), location: "Athens, GA", communityFeatures: ["lake"],
+  }), false);
+  assert.equal(shouldUseCachedMarket({
+    ...defaultSearchCriteria(), location: "Athens, GA", exteriorMaterials: ["brick"],
+  }), false);
+});
+
+test("feature-only searches deeply verify the ten most relevant candidates", () => {
+  const lake = { ...defaultSearchCriteria(), location: "Athens, GA", communityFeatures: ["lake"] };
+  assert.equal(resolveFeatureEnrichmentLimit(lake, "20"), 10);
+  assert.equal(resolveFeatureEnrichmentLimit(lake, "6"), 6);
+  assert.equal(resolveFeatureEnrichmentLimit({ ...lake, schoolMinRating: 5 }, "20"), 20);
+  assert.equal(resolveFeatureEnrichmentLimit({ ...defaultSearchCriteria(), location: "Athens, GA" }, "20"), 20);
+});
+
 test("school evidence mode retains the full 20-candidate result set", async () => {
     const properties: Property[] = Array.from({ length: 20 }, (_, index) => ({
       id: `school-p${index + 1}`, title: `Athens home ${index + 1}`, price: 300000 + index,
@@ -57,6 +77,9 @@ test("stale low budget environment values cannot disable school detail enrichmen
   const schoolCriteria = { ...defaultSearchCriteria(), location: "Athens, GA", schoolMinRating: 5 };
   assert.equal(resolveFirecrawlBudget(schoolCriteria, "15"), 45);
   assert.equal(resolveFirecrawlBudget(schoolCriteria, "60"), 60);
+  assert.equal(resolveFirecrawlBudget({
+    ...defaultSearchCriteria(), location: "Athens, GA", communityFeatures: ["lake"],
+  }, "15"), 25);
   assert.equal(resolveFirecrawlBudget({ ...defaultSearchCriteria(), location: "Boise, ID" }, "15"), 30);
 });
 

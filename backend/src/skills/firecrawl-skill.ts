@@ -72,7 +72,12 @@ export class FirecrawlSkill {
       // Version the cache whenever core metric normalization changes.
       const cacheKey = `v4:${targetUrl.toLowerCase()}`;
       const cachedMarket = this.listingCache.get(cacheKey);
-      if (cachedMarket?.length) {
+      // A basic market cache normally contains only the first result page.
+      // Feature searches intentionally inspect additional pages so likely
+      // lake/brick candidates can enter the bounded 20-detail evidence set.
+      // Reusing the first-page cache here silently disabled that discovery
+      // after any ordinary search had warmed the cache.
+      if (cachedMarket?.length && shouldUseCachedMarket(criteria)) {
         const warning = "Using recently cached real Realtor listings to avoid another listing-page scrape; results are not guaranteed to be current.";
         const cached = applyFilters(cachedMarket.map(repairCachedCoreMetrics))
           .map((property) => addDiagnostic(property, "listing-search", "warning", warning));
@@ -267,7 +272,7 @@ export class FirecrawlSkill {
     // features, nearby amenities, and source-backed school ratings. Official
     // locators still provide attendance assignment proof below.
     if (needsListingDetail && enrich && this.apiKey) {
-      const limit = Math.max(1, Math.min(Number(process.env.RE_DETAIL_ENRICH_LIMIT || 20), 20));
+      const limit = resolveFeatureEnrichmentLimit(criteria, process.env.RE_DETAIL_ENRICH_LIMIT);
       const concurrency = Math.max(1, Math.min(Number(process.env.RE_DETAIL_CONCURRENCY || 2), 4));
       const defaultInteractLimit = hasSchoolCriteria ? 20 : 3;
       const interactLimit = Math.max(0, Math.min(Number(process.env.RE_INTERACT_FALLBACK_LIMIT || defaultInteractLimit), 20));
@@ -358,7 +363,7 @@ export class FirecrawlSkill {
 
     const needsFeatureEvidence = Boolean(criteria.exteriorMaterials?.length || criteria.communityFeatures?.length);
     if (needsFeatureEvidence && enrich && listingEvidenceSearchService.enabled) {
-      const limit = Math.max(1, Math.min(Number(process.env.RE_FEATURE_SEARCH_LIMIT || 20), 20));
+      const limit = resolveFeatureEnrichmentLimit(criteria, process.env.RE_FEATURE_SEARCH_LIMIT);
       const concurrency = Math.max(1, Math.min(Number(process.env.RE_FEATURE_SEARCH_CONCURRENCY || 2), 4));
       candidates = candidates.map((property, index) => index < limit ? property
         : addDiagnostic(property, "listing-search", "warning", `Targeted feature search limit ${limit} reached.`));
@@ -958,6 +963,22 @@ export function prioritizeCandidatesForCriteria(properties: Property[], criteria
   }).sort((a, b) => b.score - a.score || a.index - b.index).map(({ property }) => property);
 }
 
+export function shouldUseCachedMarket(criteria: SearchCriteria): boolean {
+  return !criteria.exteriorMaterials?.length && !criteria.communityFeatures?.length;
+}
+
+export function resolveFeatureEnrichmentLimit(criteria: SearchCriteria, configured?: string): number {
+  const requested = Number(configured || 20);
+  const bounded = Math.max(1, Math.min(Number.isFinite(requested) ? requested : 20, 20));
+  const hasSchoolCriteria = criteria.schoolMinRating != null || criteria.schoolAtLeastOneRating != null;
+  const hasFeatureCriteria = Boolean(criteria.exteriorMaterials?.length || criteria.communityFeatures?.length);
+  // School panels require complete coverage for the requested result set.
+  // Listing features instead use the relevance-ranked discovery set: ten
+  // detail pages cover all high-signal lake/brick candidates without spending
+  // another ten slow detail and exact-address requests on generic homes.
+  return hasFeatureCriteria && !hasSchoolCriteria ? Math.min(bounded, 10) : bounded;
+}
+
 export const firecrawlSkill = new FirecrawlSkill();
 
 export function requiresListingDetail(criteria: SearchCriteria): boolean {
@@ -981,7 +1002,7 @@ export function resolveFirecrawlBudget(criteria: SearchCriteria, configured = pr
   // PowerShell value such as RE_FIRECRAWL_REQUEST_BUDGET=15 must not silently
   // disable detail enrichment for the later candidates in a 20-property run.
   const hasFeatureCriteria = Boolean(criteria.exteriorMaterials?.length || criteria.communityFeatures?.length);
-  const minimum = hasSchoolCriteria || hasFeatureCriteria ? 45 : 30;
+  const minimum = hasSchoolCriteria ? 45 : hasFeatureCriteria ? 25 : 30;
   const requested = Number(configured);
   return Number.isFinite(requested) && requested > minimum ? Math.min(requested, 100) : minimum;
 }
