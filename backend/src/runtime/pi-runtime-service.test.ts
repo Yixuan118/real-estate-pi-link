@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { defaultSearchCriteria, Property } from "../core/types";
-import { piRuntimeService, PiRuntimeResult } from "./pi-runtime-service";
+import { formatListingRetrievalError, piRuntimeService, PiRuntimeResult } from "./pi-runtime-service";
 
 test("Pi activity and ranking are replaced with deterministic evidence results", () => {
   const result: PiRuntimeResult = {
@@ -19,6 +19,16 @@ test("Pi activity and ranking are replaced with deterministic evidence results",
   assert.equal(result.agent_activity.length, 4);
   assert.match(result.agent_activity[0].detail, /exactly 2 properties/);
   assert.doesNotMatch(result.agent_activity.map((item) => item.detail).join(" "), /11 properties/);
+});
+
+test("location errors do not tell the user to troubleshoot Firecrawl", () => {
+  const message = formatListingRetrievalError(
+    "location-error",
+    'Location "Athens, Greece" is not a supported US City, ST market.',
+  );
+  assert.match(message, /US housing markets only/i);
+  assert.match(message, /City, ST/i);
+  assert.doesNotMatch(message, /Firecrawl|API key|quota/i);
 });
 
 function candidate(id: string, price: number, overall: "verified" | "unknown" | "failed", score: number): Property {

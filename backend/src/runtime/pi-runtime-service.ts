@@ -46,7 +46,7 @@ class PiRuntimeService {
         const fcSkill = new FirecrawlSkill();
         const fcResult = await fcSkill.searchProperties(input.criteria as any);
         if (fcResult.error && (!fcResult.properties || fcResult.properties.length === 0)) {
-          const message = `Live Realtor listing retrieval failed: ${fcResult.error}. Demo properties were not substituted. Check the Firecrawl quota, API key, and service status, then retry.`;
+          const message = formatListingRetrievalError(fcResult.source, fcResult.error);
           return {
             assistant_message: message,
             agent_activity: [
@@ -254,6 +254,13 @@ private async callLLM(prompt: string): Promise<string> {
       warnings: Array.isArray(parsed.warnings) ? parsed.warnings : [],
     };
   }
+}
+
+export function formatListingRetrievalError(source: string, error: string): string {
+  if (source === "location-error") {
+    return `This project searches US housing markets only. Use an unambiguous location in City, ST format. ${error}`.trim();
+  }
+  return `Live Realtor listing retrieval failed: ${error.replace(/[.]+$/, "")}. Demo properties were not substituted. Check the Firecrawl quota, API key, and service status, then retry.`;
 }
 
 export const piRuntimeService = new PiRuntimeService();
