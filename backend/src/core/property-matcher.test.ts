@@ -208,6 +208,16 @@ test("256 Wood Lake keeps the Realtor lake excerpt and displays 2 full plus 1 ha
   assert.match(lakeCheck?.detail || "", /realtor\.com/i);
 });
 
+test("community evidence does not join a Pool field to a later Wood Lake driving direction", () => {
+  const content = `{"category":"Amenities and Community Features","text":["Community Features: Pool"]},
+    {"category":"Other Property Info","text":["Directions: turn right into Wood Lake"]},
+    {"description":"This gated neighborhood includes a community pool, and lake, surrounded by trees."}`;
+  const evidence = extractCommunityWaterEvidence(content);
+  assert.deepEqual(evidence.features, ["lake"]);
+  assert.ok(evidence.snippets.some((snippet) => /neighborhood includes a community pool, and lake/i.test(snippet)));
+  assert.ok(evidence.snippets.every((snippet) => !/Community Features: Pool.*Directions/i.test(snippet)));
+});
+
 test("strict requested-market matching rejects same-name cities, nearby cities, and foreign results", () => {
   const property = (location: string): Pick<Property, "title" | "location"> => ({
     title: `1 Main St, ${location}`, location,
