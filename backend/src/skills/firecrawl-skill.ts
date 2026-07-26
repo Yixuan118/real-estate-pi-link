@@ -62,6 +62,10 @@ export class FirecrawlSkill {
 
     try {
       const loc = await this.parseLocation(criteria.location);
+      // All downstream filters and assessments must use the exact market that
+      // produced the Realtor URL. A bare ambiguous city such as Portland or
+      // Athens must not accept a result from another state.
+      criteria = { ...criteria, location: canonicalMarketLocation(loc) };
       let targetUrl = "https://www.realtor.com/realestateandhomes-search/" + loc.citySlug + "_" + loc.stateCode;
 
       const page = (criteria as any).page || 1;
@@ -129,7 +133,10 @@ export class FirecrawlSkill {
     }
 
     const message = err instanceof Error ? err.message : String(err);
-    const cached = this.loadPriorLiveListings(criteria.location);
+    if (/not a supported US City, ST market|Cannot determine the state for location/i.test(message)) {
+      return { properties: [], source: "location-error", totalCount: 0, error: message };
+    }
+    const cached = this.loadPriorLiveListings(criteria.location!);
     if (cached.length) {
       const warning = `Live Realtor scrape failed (${message}); using previously captured real Realtor listings. Results are not live and may include sold or changed listings.`;
       const candidates = applyFilters(cached)
@@ -147,7 +154,7 @@ export class FirecrawlSkill {
 }
 
     const message = "Firecrawl returned no parseable live Realtor listings.";
-    const cached = this.loadPriorLiveListings(criteria.location);
+    const cached = this.loadPriorLiveListings(criteria.location!);
     if (cached.length) {
       const warning = `${message} Using previously captured real Realtor listings; results are not live.`;
       const candidates = applyFilters(cached)
@@ -597,35 +604,33 @@ export class FirecrawlSkill {
     // Strip price/noise words before location matching
     let clean = location.toLowerCase().trim();
     clean = clean.replace(/\s+(priced|under|over|budget|max|min|million|thousand|k|dollars?)\b.*$/i, "").trim();
+    clean = clean.replace(/,\s*(?:united states(?: of america)?|u\.?s\.?a?\.?)\s*$/i, "").trim();
     const lower = clean;
-    // Explicit City, ST always wins over aliases. This prevents Portland, ME
-    // becoming Portland, OR and Athens, OH becoming Athens, GA.
-    const stateMatch = lower.match(/^(.+?),?\s+([a-z]{2})$/);
-    if (stateMatch && isUsStateCode(stateMatch[2])) {
-      const city = stateMatch[1].trim();
-      return { citySlug: slugifyCity(city), stateCode: stateMatch[2].toUpperCase() };
+    // Explicit City, ST or City, State always wins over aliases. An explicit
+    // foreign country/province is rejected instead of silently becoming a US
+    // same-name city (for example Athens, Greece or London, UK).
+    const commaLocation = lower.match(/^(.+?),\s*([^,]+)$/);
+    if (commaLocation) {
+      const stateCode = normalizeUsStateCode(commaLocation[2]);
+      if (!stateCode) {
+        throw new Error(`Location "${location}" is not a supported US City, ST market.`);
+      }
+      return { citySlug: slugifyCity(commaLocation[1].trim()), stateCode };
     }
-    if (lower.includes("atlanta")) return { citySlug: "atlanta", stateCode: "GA" }; if (lower.includes("seattle")) return { citySlug: "seattle", stateCode: "WA" };
-    if (lower.includes("new york")) return { citySlug: "new-york", stateCode: "NY" };
-    if (lower.includes("san francisco")) return { citySlug: "san-francisco", stateCode: "CA" };
-    if (lower.includes("los angeles")) return { citySlug: "los-angeles", stateCode: "CA" };
-    if (lower.includes("chicago")) return { citySlug: "chicago", stateCode: "IL" };
-    if (lower.includes("boston")) return { citySlug: "boston", stateCode: "MA" };
-    if (lower.includes("miami")) return { citySlug: "miami", stateCode: "FL" };
-    if (lower.includes("austin")) return { citySlug: "austin", stateCode: "TX" };
-    if (lower.includes("denver")) return { citySlug: "denver", stateCode: "CO" };
-    if (lower.includes("athens")) return { citySlug: "athens", stateCode: "GA" };
-    if (lower.includes("portland")) return { citySlug: "portland", stateCode: "OR" };
-    if (lower.includes("philadelphia")) return { citySlug: "philadelphia", stateCode: "PA" };
-    if (lower.includes("washington")) return { citySlug: "washington", stateCode: "DC" };
-    if (lower.includes("phoenix")) return { citySlug: "phoenix", stateCode: "AZ" };
-    if (lower.includes("detroit")) return { citySlug: "detroit", stateCode: "MI" };
-    if (lower.includes("san diego")) return { citySlug: "san-diego", stateCode: "CA" };
 
     for (const [city, state] of Object.entries(cityToState)) {
-      if (lower.includes(city)) {
+      if (lower === city) {
         return { citySlug: city.replace(/[^a-z0-9]+/g, "-").replace(/-$/g, ""), stateCode: state };
       }
+    }
+    for (const stateName of Object.keys(US_STATE_NAME_TO_CODE).sort((a, b) => b.length - a.length)) {
+      if (!lower.endsWith(` ${stateName}`)) continue;
+      const city = lower.slice(0, -(stateName.length + 1)).trim();
+      if (city) return { citySlug: slugifyCity(city), stateCode: US_STATE_NAME_TO_CODE[stateName] };
+    }
+    const stateMatch = lower.match(/^(.+?)\s+([a-z]{2})$/);
+    if (stateMatch && isUsStateCode(stateMatch[2])) {
+      return { citySlug: slugifyCity(stateMatch[1].trim()), stateCode: stateMatch[2].toUpperCase() };
     }
     const hereKey = process.env.HERE_API_KEY || "";
     if (hereKey) {
@@ -1300,6 +1305,30 @@ function normalizePropertyAddress(property: Property): string {
 
 function slugifyCity(city: string): string {
   return city.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+}
+
+export function canonicalMarketLocation(location: { citySlug: string; stateCode: string }): string {
+  return `${location.citySlug.replace(/-+/g, " ")}, ${location.stateCode.toUpperCase()}`;
+}
+
+const US_STATE_NAME_TO_CODE: Record<string, string> = {
+  alabama: "AL", alaska: "AK", arizona: "AZ", arkansas: "AR", california: "CA", colorado: "CO",
+  connecticut: "CT", delaware: "DE", florida: "FL", georgia: "GA", hawaii: "HI", idaho: "ID",
+  illinois: "IL", indiana: "IN", iowa: "IA", kansas: "KS", kentucky: "KY", louisiana: "LA",
+  maine: "ME", maryland: "MD", massachusetts: "MA", michigan: "MI", minnesota: "MN",
+  mississippi: "MS", missouri: "MO", montana: "MT", nebraska: "NE", nevada: "NV",
+  "new hampshire": "NH", "new jersey": "NJ", "new mexico": "NM", "new york": "NY",
+  "north carolina": "NC", "north dakota": "ND", ohio: "OH", oklahoma: "OK", oregon: "OR",
+  pennsylvania: "PA", "rhode island": "RI", "south carolina": "SC", "south dakota": "SD",
+  tennessee: "TN", texas: "TX", utah: "UT", vermont: "VT", virginia: "VA",
+  washington: "WA", "west virginia": "WV", wisconsin: "WI", wyoming: "WY",
+  "district of columbia": "DC",
+};
+
+function normalizeUsStateCode(value: string): string {
+  const normalized = value.toLowerCase().replace(/[^a-z ]+/g, " ").replace(/\s+/g, " ").trim();
+  if (US_STATE_NAME_TO_CODE[normalized]) return US_STATE_NAME_TO_CODE[normalized];
+  return isUsStateCode(normalized) ? normalized.toUpperCase() : "";
 }
 
 function isUsStateCode(value: string): boolean {

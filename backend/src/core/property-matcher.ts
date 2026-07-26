@@ -529,14 +529,36 @@ export function propertyMatchesRequestedMarket(property: Pick<Property, "title" 
   // Realtor is a US source. A candidate without a recognizable US state is
   // never allowed to satisfy a bare-city request (for example Athens, Greece).
   if (!actual.state) return false;
+  const defaultState = BARE_CITY_DEFAULT_STATES[expected.city];
+  if (!expected.state && defaultState && actual.state !== defaultState) return false;
   if (expected.state && actual.state !== expected.state) return false;
   if (expected.zip && actual.zip !== expected.zip) return false;
   return true;
 }
 
+const BARE_CITY_DEFAULT_STATES: Record<string, string> = {
+  athens: "ga",
+  atlanta: "ga",
+  austin: "tx",
+  boston: "ma",
+  chicago: "il",
+  denver: "co",
+  detroit: "mi",
+  miami: "fl",
+  "new york": "ny",
+  philadelphia: "pa",
+  phoenix: "az",
+  portland: "or",
+  "san diego": "ca",
+  "san francisco": "ca",
+  seattle: "wa",
+  washington: "dc",
+};
+
 function parseLocationParts(location: string): { city: string; state: string; zip: string } {
   const cleaned = String(location || "")
     .replace(/\s+(?:priced|under|over|budget|max|min|million|thousand|dollars?).*$/i, "")
+    .replace(/,\s*(?:united states(?: of america)?|u\.?s\.?a?\.?)\s*$/i, "")
     .trim();
   const zip = cleaned.match(/\b(\d{5})(?:-\d{4})?\b/)?.[1] || "";
   const parts = cleaned.split(",").map((part) => normalizeText(part)).filter(Boolean);

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { extractPropertyEvidence } from "../core/property-matcher";
 import { defaultSearchCriteria, Property, UserSession } from "../core/types";
-import { detailNeedsInteractiveExpansion, extractInteractText, FirecrawlSkill, isSchoolOnlyDetailRequest, prepareDetailEvidenceContent, prepareSearchPagePropertyEvidence, prioritizeCandidatesForCriteria, requiresListingDetail, resolveFeatureEnrichmentLimit, resolveFirecrawlBudget, selectCachedLiveProperties, shouldUseCachedMarket, shouldVerifyBathroomsSeparately } from "./firecrawl-skill";
+import { canonicalMarketLocation, detailNeedsInteractiveExpansion, extractInteractText, FirecrawlSkill, isSchoolOnlyDetailRequest, prepareDetailEvidenceContent, prepareSearchPagePropertyEvidence, prioritizeCandidatesForCriteria, requiresListingDetail, resolveFeatureEnrichmentLimit, resolveFirecrawlBudget, selectCachedLiveProperties, shouldUseCachedMarket, shouldVerifyBathroomsSeparately } from "./firecrawl-skill";
 
 test("caps the assessed result set at 20 properties", async () => {
   const properties: Property[] = Array.from({ length: 30 }, (_, index) => ({
@@ -167,6 +167,27 @@ test("explicit City, ST locations work nationwide and override ambiguous aliases
   assert.deepEqual(await skill.parseLocation("Portland, ME"), { citySlug: "portland", stateCode: "ME" });
   assert.deepEqual(await skill.parseLocation("Athens, OH"), { citySlug: "athens", stateCode: "OH" });
   assert.deepEqual(await skill.parseLocation("Coeur d'Alene, ID"), { citySlug: "coeur-d-alene", stateCode: "ID" });
+  assert.deepEqual(await skill.parseLocation("Portland, Maine"), { citySlug: "portland", stateCode: "ME" });
+  assert.deepEqual(await skill.parseLocation("Kansas City Missouri"), { citySlug: "kansas-city", stateCode: "MO" });
+  assert.deepEqual(await skill.parseLocation("Athens, GA, USA"), { citySlug: "athens", stateCode: "GA" });
+  await assert.rejects(() => skill.parseLocation("Athens, Greece"), /not a supported US/i);
+  await assert.rejects(() => skill.parseLocation("London, UK"), /not a supported US/i);
+  assert.equal(canonicalMarketLocation({ citySlug: "springfield", stateCode: "IL" }), "springfield, IL");
+});
+
+test("an explicit foreign location never falls back to cached US same-name listings", async () => {
+  let requests = 0;
+  const mockFetch = async () => {
+    requests += 1;
+    return new Response("{}", { status: 200 });
+  };
+  const result = await new FirecrawlSkill(mockFetch as typeof fetch, "test-key").searchProperties({
+    ...defaultSearchCriteria(), location: "Athens, Greece",
+  });
+  assert.equal(requests, 0);
+  assert.equal(result.source, "location-error");
+  assert.equal(result.properties.length, 0);
+  assert.match(result.error || "", /not a supported US/i);
 });
 
 test("structured living area accepts comma-formatted values without confusing lot size", () => {

@@ -53,6 +53,13 @@ test("extracts an arbitrary bare US city after a location preposition", () => {
   assert.equal(result.criteria.location, "Boise");
 });
 
+test("preserves explicit states and foreign qualifiers for strict location resolution", () => {
+  assert.equal(regexExtract("Find homes in Portland, ME with 3 bedrooms", defaultSearchCriteria()).criteria.location, "Portland, ME");
+  assert.equal(regexExtract("Find homes in Portland, Maine under $700k", defaultSearchCriteria()).criteria.location, "Portland, Maine");
+  assert.equal(regexExtract("Find homes in Athens, Greece", defaultSearchCriteria()).criteria.location, "Athens, Greece");
+  assert.equal(regexExtract("Find homes in London, UK", defaultSearchCriteria()).criteria.location, "London, UK");
+});
+
 test("extracts the mixed Chinese and English complex query", () => {
   const result = regexExtract(
     "房子四面墙是砖墙，小区里有湖，离supermarket or large grocery store不超过三英里，离UGA不超过30英里。",
@@ -230,6 +237,11 @@ test("strict requested-market matching rejects same-name cities, nearby cities, 
   assert.equal(propertyMatchesRequestedMarket(property("Seattle, WA 98101"), "Seattle"), true);
   assert.equal(propertyMatchesRequestedMarket(property("Seattle, Canada"), "Seattle"), false);
   assert.equal(propertyMatchesRequestedMarket(property("Seattle, BC"), "Seattle"), false);
+  assert.equal(propertyMatchesRequestedMarket(property("Athens, OH 45701"), "Athens"), false);
+  assert.equal(propertyMatchesRequestedMarket(property("Portland, ME 04101"), "Portland"), false);
+  assert.equal(propertyMatchesRequestedMarket(property("Washington, PA 15301"), "Washington"), false);
+  assert.equal(propertyMatchesRequestedMarket(property("Athens, GA, USA"), "Athens, GA"), true);
+  assert.equal(propertyMatchesRequestedMarket(property("Athens, GA, United States"), "Athens, GA"), true);
 });
 
 test("extracts Realtor detail-page brick, groceries, and score-first school evidence", () => {

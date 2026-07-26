@@ -211,9 +211,12 @@ export function regexExtract(input: string, current: SearchCriteria): { criteria
   const commonCities = ["seattle", "new york", "san francisco", "los angeles", "bellevue", "redmond", "chicago", "boston", "austin", "denver", "miami", "dallas", "portland", "washington", "san diego", "athens"];
   // Find location first, then strip price-related words that may follow it
   let rawLocation: string | null = null;
-  const cityStateMatch = normalizedInput.match(/\b([A-Za-z][A-Za-z .'-]{1,50}?),\s*([A-Z]{2})\b/i);
-  if (cityStateMatch) {
-    criteria.location = `${cityStateMatch[1].trim()}, ${cityStateMatch[2].toUpperCase()}`;
+  const explicitLocationMatch = normalizedInput.match(
+    /\b(?:in|near|around)\s+([A-Za-z][A-Za-z .'-]{1,50}?),\s*([A-Za-z][A-Za-z .'-]{0,30}?)(?=\s+(?:with|under|over|below|above|priced|for|that|having|at\s+least|\d+\s*(?:bed|br|bath))|[.!?]|$)/i,
+  ) || normalizedInput.match(/^\s*([A-Za-z][A-Za-z .'-]{1,50}?),\s*([A-Za-z][A-Za-z .'-]{0,30})\s*$/i);
+  if (explicitLocationMatch) {
+    const region = explicitLocationMatch[2].trim();
+    criteria.location = `${explicitLocationMatch[1].trim()}, ${/^[A-Za-z]{2}$/.test(region) ? region.toUpperCase() : region}`;
     changes.push("Looking in " + criteria.location);
   }
   const genericLocationMatch = normalizedInput.match(
