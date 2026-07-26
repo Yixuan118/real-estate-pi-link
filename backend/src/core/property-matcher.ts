@@ -102,6 +102,7 @@ export function extractPropertyEvidence(property: Property, content: string): Pr
   }
 
   const coreMetrics = extractCoreListingMetrics(text, property.title);
+  const bathroomBreakdown = extractExplicitBathroomBreakdown(text);
 
   const schools = mergeSchoolEvidence(property.schools || [], extractSchoolEvidence(content, property.url || "", "realtor-listing"));
   const listingFacts = mergeListingFacts(property.listingFacts || {}, extractListingFacts(content));
@@ -110,9 +111,9 @@ export function extractPropertyEvidence(property: Property, content: string): Pr
   return {
     ...property,
     bedrooms: coreMetrics.bedrooms ?? property.bedrooms,
-    bathrooms: coreMetrics.bathrooms ?? property.bathrooms,
-    fullBathrooms: coreMetrics.fullBathrooms ?? property.fullBathrooms,
-    halfBathrooms: coreMetrics.halfBathrooms ?? property.halfBathrooms,
+    bathrooms: bathroomBreakdown?.bathrooms ?? coreMetrics.bathrooms ?? property.bathrooms,
+    fullBathrooms: bathroomBreakdown?.fullBathrooms ?? coreMetrics.fullBathrooms ?? property.fullBathrooms,
+    halfBathrooms: bathroomBreakdown?.halfBathrooms ?? coreMetrics.halfBathrooms ?? property.halfBathrooms,
     sqft: coreMetrics.sqft ?? property.sqft,
     sqftSource: coreMetrics.sqftSource ?? property.sqftSource,
     description: property.description || extractListingDescription(listingEvidenceText) || visibleText.slice(0, 3000),
@@ -221,14 +222,15 @@ export function extractCoreListingMetrics(
     ]);
     const halfBathrooms = firstMetric(window, [
       /\bHalf Bathrooms?\s*[:\-]?\s*(\d+)\b/i,
+      /\b1\s*\/\s*2 Bathrooms?\s*[:\-]?\s*(\d+)\b/i,
       /\b(\d+)\s+(?:half|partial) bathrooms?\b/i,
       /\b(\d+)\s+half baths?\b/i,
       /\b(\d+)\s+half ba\b/i,
       /["'](?:numberOfHalfBathrooms|bathroomsHalf|baths_half)["']\s*:\s*(\d+)/i,
     ]);
     const explicitTotal = firstMetric(window, [
-      /\bTotal Bathrooms?\s*[:\-]?\s*(\d+)\b/i,
-      /["'](?:numberOfBathroomsTotal|bathroomsTotal)["']\s*:\s*(\d+)/i,
+      /\bTotal Bathrooms?\s*[:\-]?\s*(\d+(?:\.\d+)?)\b/i,
+      /["'](?:numberOfBathroomsTotal|bathroomsTotal)["']\s*:\s*(\d+(?:\.\d+)?)/i,
     ]);
     if (fullBathrooms != null && halfBathrooms != null) {
       return {
@@ -247,7 +249,7 @@ export function extractCoreListingMetrics(
     const match = labelFirst || valueFirst;
     if (!match) continue;
     const bedrooms = validMetric(match[1], 0, 20);
-    const bathrooms = validMetric(match[2], 0, 20);
+    const bathrooms = explicitTotal ?? validMetric(match[2], 0, 20);
     const cardSqft = validMetric(match[3]?.replace(/,/g, ""), 100, 100000);
     const sqft = explicitSqft ?? cardSqft;
     if (bedrooms != null || bathrooms != null || sqft != null) {
@@ -256,15 +258,55 @@ export function extractCoreListingMetrics(
         ...(sqft != null ? { sqftSource: explicitSqft != null ? "detail-page" as const : "listing-card" as const } : {}),
       };
     }
-    if (explicitSqft != null) return { sqft: explicitSqft, sqftSource: "detail-page" };
+    if (explicitTotal != null || explicitSqft != null) {
+      return {
+        bathrooms: explicitTotal,
+        sqft: explicitSqft,
+        ...(explicitSqft != null ? { sqftSource: "detail-page" as const } : {}),
+      };
+    }
   }
   return {};
+}
+
+function extractExplicitBathroomBreakdown(content: string): {
+  bathrooms: number;
+  fullBathrooms: number;
+  halfBathrooms: number;
+} | undefined {
+  const find = (patterns: RegExp[]): { value: number; index: number } | undefined => {
+    for (const pattern of patterns) {
+      const match = pattern.exec(content);
+      const value = Number(match?.[1]);
+      if (match?.index != null && Number.isInteger(value) && value >= 0 && value < 20) {
+        return { value, index: match.index };
+      }
+    }
+    return undefined;
+  };
+  const full = find([
+    /\bFull Bathrooms?\s*[:\-]?\s*(\d+)\b/i,
+    /\b(\d+)\s+full bathrooms?\b/i,
+    /\b(\d+)\s+full baths?\b/i,
+  ]);
+  const half = find([
+    /\b1\s*\/\s*2 Bathrooms?\s*[:\-]?\s*(\d+)\b/i,
+    /\bHalf Bathrooms?\s*[:\-]?\s*(\d+)\b/i,
+    /\b(\d+)\s+(?:half|partial) bathrooms?\b/i,
+    /\b(\d+)\s+half baths?\b/i,
+  ]);
+  if (!full || !half || Math.abs(full.index - half.index) > 1200) return undefined;
+  return {
+    bathrooms: full.value + (half.value * 0.5),
+    fullBathrooms: full.value,
+    halfBathrooms: half.value,
+  };
 }
 
 function firstMetric(content: string, patterns: RegExp[], minimum = 0, maximum = 20): number | undefined {
   for (const pattern of patterns) {
     const value = Number(String(content.match(pattern)?.[1] || "").replace(/,/g, ""));
-    if (Number.isInteger(value) && value > minimum && value < maximum) return value;
+    if (Number.isFinite(value) && value > minimum && value < maximum) return value;
   }
   return undefined;
 }

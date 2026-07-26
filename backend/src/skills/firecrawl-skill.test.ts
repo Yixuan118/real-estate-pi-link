@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { extractPropertyEvidence } from "../core/property-matcher";
 import { defaultSearchCriteria, Property, UserSession } from "../core/types";
 import { detailNeedsInteractiveExpansion, extractInteractText, FirecrawlSkill, isSchoolOnlyDetailRequest, prepareDetailEvidenceContent, prepareSearchPagePropertyEvidence, prioritizeCandidatesForCriteria, requiresListingDetail, resolveFeatureEnrichmentLimit, resolveFirecrawlBudget, selectCachedLiveProperties, shouldUseCachedMarket, shouldVerifyBathroomsSeparately } from "./firecrawl-skill";
 
@@ -68,11 +69,28 @@ test("large Realtor documents are reduced to bounded evidence windows without lo
     parent_category: "Community",
     text: ["Community Features: Gated, Lake, Pool, Sidewalks"],
   });
-  const raw = `<html>${"x".repeat(350_000)}${collapsedLake}${"y".repeat(350_000)}</html>`;
+  const bathroomBlock = JSON.stringify({
+    key: "bathroom",
+    category: "Bathroom",
+    detailedText: [{ subCategory: "Bathrooms", text: [
+      "Total Bathrooms: 2.5", "Full Bathrooms: 2", "1/2 Bathrooms: 1",
+    ] }],
+  });
+  const raw = `<html>${"x".repeat(350_000)}${collapsedLake}${"y".repeat(350_000)}${bathroomBlock}${"z".repeat(80_000)}</html>`;
   const criteria = { ...defaultSearchCriteria(), location: "Athens, GA", communityFeatures: ["lake"] };
-  const prepared = prepareDetailEvidenceContent("Property details for 125 Wood Lake Dr.", raw, criteria, "125 Wood Lake Dr, Athens, GA");
+  const prepared = prepareDetailEvidenceContent("Property details for 256 Wood Lake Dr.", raw, criteria, "256 Wood Lake Dr, Athens, GA");
   assert.ok(prepared.length < raw.length / 2);
   assert.match(prepared, /Community Features: Gated, Lake, Pool/);
+  assert.match(prepared, /Total Bathrooms: 2\.5/);
+  const metrics = extractPropertyEvidence({
+    id: "wood-lake", title: "256 Wood Lake Dr, Athens, GA 30606", price: 345000,
+    bedrooms: 2, bathrooms: 1.5, sqft: 1863, location: "Athens, GA 30606",
+    features: [], url: "https://www.realtor.com/wood-lake",
+    listedAt: new Date().toISOString(), source: "Realtor.com",
+  }, prepared);
+  assert.equal(metrics.bathrooms, 2.5);
+  assert.equal(metrics.fullBathrooms, 2);
+  assert.equal(metrics.halfBathrooms, 1);
 });
 
 test("school evidence mode retains the full 20-candidate result set", async () => {

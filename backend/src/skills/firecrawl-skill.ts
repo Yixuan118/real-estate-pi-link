@@ -1049,9 +1049,14 @@ export function prepareDetailEvidenceContent(
 ): string {
   if (rawHtml.length <= 300_000) return `${markdown}\n${rawHtml}`;
 
-  const chunks: string[] = [markdown.slice(0, 160_000), rawHtml.slice(0, 30_000)];
+  const chunks: string[] = [markdown.slice(0, 100_000), rawHtml.slice(0, 20_000)];
   const needles = new Set<string>([
     propertyTitle.split(",")[0].trim(),
+    // Core metrics must survive feature-focused compression too. Realtor
+    // often keeps the authoritative full/half breakdown only in a collapsed
+    // Bathroom JSON block far beyond the first several hundred KB.
+    '"category":"Bathroom"', "total bathrooms", "full bathrooms", "1/2 bathrooms",
+    "half bathrooms", "partial bathroom", "living area", '"floorSize"',
     '"category"', "property details", "listing details", "source neighborhood",
     "subdivision", "homeowners association", "association amenities",
   ].filter(Boolean).map((value) => value.toLowerCase()));
@@ -1071,14 +1076,21 @@ export function prepareDetailEvidenceContent(
   let windows = 0;
   for (const needle of needles) {
     let from = 0;
-    while (windows < 36) {
+    let needleWindows = 0;
+    while (windows < 24 && needleWindows < 2) {
       const index = lower.indexOf(needle, from);
       if (index < 0) break;
-      chunks.push(rawHtml.slice(Math.max(0, index - 2500), Math.min(rawHtml.length, index + 7500)));
+      // Prefix the exact property identity so downstream metric extraction
+      // treats each retained JSON window as belonging to this listing.
+      chunks.push(`${propertyTitle}\n${rawHtml.slice(
+        Math.max(0, index - 500),
+        Math.min(rawHtml.length, index + 4500),
+      )}`);
       windows += 1;
+      needleWindows += 1;
       from = index + needle.length;
     }
-    if (windows >= 36) break;
+    if (windows >= 24) break;
   }
   chunks.push(rawHtml.slice(-15_000));
   return chunks.join("\n");
