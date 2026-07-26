@@ -83,6 +83,12 @@ export class ListingEvidenceSearchService {
       const hasLake = (enriched.communityFeatures || []).some((item) => /lake|pond/i.test(item));
       if (!hadLake && hasLake) evidence.push({ criterion: "community-lake", sourceUrl: property.url, source: "targeted-web-search", checkedAt });
     }
+    for (const item of enriched.featureEvidence || []) {
+      const existing = evidence.find((candidate) =>
+        candidate.criterion === item.criterion && candidate.sourceUrl === item.sourceUrl);
+      if (!existing) evidence.push(item);
+      else if (!existing.excerpt && item.excerpt) existing.excerpt = item.excerpt;
+    }
     return { ...enriched, featureEvidence: evidence };
   }
 

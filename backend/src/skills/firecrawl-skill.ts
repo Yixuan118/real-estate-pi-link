@@ -259,7 +259,7 @@ export class FirecrawlSkill {
           const enriched = await listingEvidenceSearchService.enrichBathroomDetails(candidates[index]);
           const verified = enriched.fullBathrooms != null && enriched.halfBathrooms != null;
           candidates[index] = addDiagnostic(enriched, "listing-search", verified ? "success" : "warning", verified
-            ? `Bathroom breakdown verified: ${enriched.fullBathrooms} full and ${enriched.halfBathrooms} half (${enriched.bathrooms} total rooms).`
+            ? `Bathroom breakdown verified: ${enriched.fullBathrooms} full and ${enriched.halfBathrooms} half (${enriched.bathrooms} baths).`
             : "Exact-address sources did not provide a full/half bathroom breakdown; the Realtor summary count may omit half baths.");
         } catch (error) {
           candidates[index] = addDiagnostic(candidates[index], "listing-search", "warning",
@@ -1308,10 +1308,10 @@ function extractBathroomTotal(listing: any): number {
   const full = firstPositiveNumber(listing.numberOfFullBathrooms, listing.bathroomsFull);
   const half = firstPositiveNumber(listing.numberOfHalfBathrooms, listing.bathroomsHalf);
   const threeQuarter = firstPositiveNumber(listing.numberOfThreeQuarterBathrooms, listing.bathroomsThreeQuarter);
-  // Preserve the number of bathroom rooms used by MLS/Zillow total-bathroom
-  // displays. The UI also shows the full/half breakdown so this is unambiguous.
+  // Match Realtor's consumer-facing bath convention. Some MLS feeds call
+  // 2 full + 1 half "3 total bathrooms", but Realtor displays it as 2.5.
   if (full != null && (half != null || threeQuarter != null)) {
-    return full + (half || 0) + (threeQuarter || 0);
+    return full + ((half || 0) * 0.5) + ((threeQuarter || 0) * 0.75);
   }
   return firstPositiveNumber(
     listing.numberOfBathroomsTotal, listing.bathroomsTotal, listing.numberOfBathrooms,

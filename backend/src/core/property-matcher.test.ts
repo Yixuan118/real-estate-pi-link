@@ -9,7 +9,7 @@ test("uses full and half bathroom evidence instead of an incomplete summary coun
     "287 Pondview Dr, Athens, GA 30605 · 4 bd · 2 ba · 1 half ba · 1,809 sqft",
     "287 Pondview Dr, Athens, GA 30605",
   );
-  assert.deepEqual(metrics, { bathrooms: 3, fullBathrooms: 2, halfBathrooms: 1 });
+  assert.deepEqual(metrics, { bathrooms: 2.5, fullBathrooms: 2, halfBathrooms: 1 });
 });
 
 test("explicit living area overrides a nearby lot-size-like card value", () => {
@@ -183,6 +183,29 @@ test("accepts HOA lake rights and rejects lake views or nearby public lakes", ()
   );
   assert.deepEqual(extractCommunityWaterEvidence("View: Lake. Water Body Name: Lake Oconee.").features, []);
   assert.deepEqual(extractCommunityWaterEvidence("Public lake located 0.4 miles away.").features, []);
+});
+
+test("256 Wood Lake keeps the Realtor lake excerpt and displays 2 full plus 1 half as 2.5 baths", () => {
+  const property = extractPropertyEvidence({
+    id: "wood-lake", title: "256 Wood Lake Dr, Athens, GA 30606", price: 345000,
+    bedrooms: 2, bathrooms: 1.5, sqft: 1863, location: "Athens, GA 30606",
+    features: [], url: "https://www.realtor.com/realestateandhomes-detail/256-Wood-Lake-Dr_Athens_GA_30606_M68277-44687",
+    listedAt: new Date().toISOString(), source: "Realtor.com",
+  }, `Property details
+    This home has 2 full bathrooms and 1 partial bathroom.
+    This gated neighborhood includes a community pool, and lake, surrounded by trees.
+  `);
+  assert.equal(property.bathrooms, 2.5);
+  assert.equal(property.fullBathrooms, 2);
+  assert.equal(property.halfBathrooms, 1);
+  assert.deepEqual(property.communityFeatures, ["lake"]);
+  assert.match(property.featureEvidence?.[0]?.excerpt || "", /neighborhood includes a community pool, and lake/i);
+
+  const match = assessProperty(property, { ...defaultSearchCriteria(), communityFeatures: ["lake"] });
+  assert.equal(match.overall, "verified");
+  const lakeCheck = match.checks.find((check) => check.criterion === "community feature: lake");
+  assert.match(lakeCheck?.detail || "", /Listing evidence:.*community pool, and lake/i);
+  assert.match(lakeCheck?.detail || "", /realtor\.com/i);
 });
 
 test("strict requested-market matching rejects same-name cities, nearby cities, and foreign results", () => {

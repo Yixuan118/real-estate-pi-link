@@ -373,7 +373,7 @@ test("rendered Realtor summary overrides incomplete JSON-LD bathroom totals", ()
   );
 });
 
-test("preserves Realtor full and half bathroom fields and total bathroom rooms", () => {
+test("preserves Realtor full and half bathroom fields using the consumer-facing fractional total", () => {
   const jsonLd = [{
     "@type": "CollectionPage",
     mainEntity: { itemListElement: [{
@@ -390,7 +390,7 @@ test("preserves Realtor full and half bathroom fields and total bathroom rooms",
   const result = (new FirecrawlSkill() as any).parsePropertiesFromHtml(raw, defaultSearchCriteria(), "");
   assert.deepEqual(
     { bathrooms: result[0].bathrooms, fullBathrooms: result[0].fullBathrooms, halfBathrooms: result[0].halfBathrooms },
-    { bathrooms: 3, fullBathrooms: 2, halfBathrooms: 1 },
+    { bathrooms: 2.5, fullBathrooms: 2, halfBathrooms: 1 },
   );
 });
 

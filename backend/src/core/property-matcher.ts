@@ -75,12 +75,18 @@ export function extractPropertyEvidence(property: Property, content: string): Pr
     if (/lake|pond/i.test(existing) && !originalCommunityWater.has(existing)) communityFeatures.delete(existing);
   }
   for (const feature of communityWater.features) communityFeatures.add(feature);
-  if (communityWater.features.length && property.url
-      && !featureEvidence.some((item) => item.criterion === "community-lake" && item.sourceUrl === property.url)) {
-    featureEvidence.push({
-      criterion: "community-lake", sourceUrl: property.url, source: "realtor-listing",
-      checkedAt: new Date().toISOString(),
-    });
+  if (communityWater.features.length && property.url) {
+    const excerpt = communityWater.snippets.find((snippet) => /\b(?:lake|pond)\b/i.test(snippet));
+    const existingEvidence = featureEvidence.find((item) =>
+      item.criterion === "community-lake" && item.sourceUrl === property.url);
+    if (existingEvidence) {
+      if (!existingEvidence.excerpt && excerpt) existingEvidence.excerpt = excerpt;
+    } else {
+      featureEvidence.push({
+        criterion: "community-lake", sourceUrl: property.url, source: "realtor-listing",
+        checkedAt: new Date().toISOString(), excerpt,
+      });
+    }
   }
 
   extractNearbyDistances(text).forEach((place) => {
@@ -226,7 +232,10 @@ export function extractCoreListingMetrics(
     ]);
     if (fullBathrooms != null && halfBathrooms != null) {
       return {
-        bathrooms: explicitTotal ?? fullBathrooms + halfBathrooms,
+        // Realtor's consumer-facing convention represents a half bath as
+        // 0.5. Some MLS feeds separately call 2 full + 1 half "3 total
+        // bathrooms" because they count rooms, but the listing card says 2.5.
+        bathrooms: fullBathrooms + (halfBathrooms * 0.5),
         fullBathrooms,
         halfBathrooms,
         ...(explicitSqft != null ? { sqft: explicitSqft, sqftSource: "detail-page" as const } : {}),
@@ -333,9 +342,10 @@ export function assessProperty(property: Property, criteria: SearchCriteria): Pr
     const nearestWater = /lake|pond/i.test(normalized) ? property.nearbyWaterBodies?.[0] : undefined;
     const communityEvidence = /lake|pond/i.test(normalized)
       ? property.featureEvidence?.find((item) => item.criterion === "community-lake") : undefined;
+    const excerpt = communityEvidence?.excerpt?.replace(/\s+/g, " ").trim().slice(0, 320);
     checks.push(found
       ? verified(`community feature: ${feature}`, communityEvidence?.sourceUrl
-        ? `A property, HOA, or subdivision source explicitly describes a community ${feature}: ${communityEvidence.sourceUrl}`
+        ? `${excerpt ? `Listing evidence: “${excerpt}” ` : `A property, HOA, or subdivision source explicitly describes a community ${feature}. `}Source: ${communityEvidence.sourceUrl}`
         : `The Realtor property evidence explicitly describes a community ${feature}.`)
       : nearestWater
         ? unknown(`community feature: ${feature}`, `${nearestWater.name} is mapped ${nearestWater.distanceMiles.toFixed(2)} straight-line miles away by ${nearestWater.source}, but proximity does not prove that it belongs to the subdivision or is accessible to residents.`)

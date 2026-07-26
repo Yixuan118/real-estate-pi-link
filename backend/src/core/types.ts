@@ -80,6 +80,7 @@ export interface Property {
     sourceUrl: string;
     source: "realtor-listing" | "targeted-web-search";
     checkedAt: string;
+    excerpt?: string;
   }>;
   nearbyPlaces?: Array<{
     name: string;

@@ -107,7 +107,7 @@ test("verifies a new-construction bathroom breakdown by exact address and caches
   assert.equal(calls, 1);
   assert.deepEqual(
     { bathrooms: first.bathrooms, fullBathrooms: first.fullBathrooms, halfBathrooms: first.halfBathrooms },
-    { bathrooms: 3, fullBathrooms: 2, halfBathrooms: 1 },
+    { bathrooms: 2.5, fullBathrooms: 2, halfBathrooms: 1 },
   );
-  assert.equal(second.bathrooms, 3);
+  assert.equal(second.bathrooms, 2.5);
 });
