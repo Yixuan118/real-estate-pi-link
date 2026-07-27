@@ -4,6 +4,8 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { extractGreatSchoolsRating, extractSchoolEvidence, extractTargetSchoolRating, SchoolRatingService } from "./school-rating-service";
+import { assessProperty } from "../core/property-matcher";
+import { defaultSearchCriteria } from "../core/types";
 
 test("extracts property-associated school ratings from Realtor listing data", () => {
   const schools = extractSchoolEvidence(`
@@ -63,6 +65,93 @@ test("extracts Realtor circle ratings when school names are markdown links", () 
     ["Clarke Middle School", 4, "middle"],
     ["Clarke Central High School", 5, "high"],
   ]);
+});
+
+test("extracts all Portland school cards when a school name has no level word", () => {
+  const listingUrl = "https://www.realtor.com/realestateandhomes-detail/40-Webb-St_Portland_ME_04102_M35641-79717";
+  const schools = extractSchoolEvidence(`
+    ## Schools
+    From listing agent
+    High School District: Portland Public Schools
+    School District: Portland Public Schools
+    Nearby schools Elementary Middle High Private
+    4 10 4 out of 10
+    [Button: Amanda C Rowe School]
+    Grades K-5 | 1.1 mi away | 414 students | 8 reviews
+    6 10 6 out of 10
+    [Lincoln Middle School](https://www.realtor.com/local/schools/Lincoln-Middle-School-0732860561)
+    Grades 6-8 | 1.8 mi away | 501 students | 12 reviews
+    2 10 2 out of 10
+    [Button: Deering High School]
+    Grades 9-12 | 2.0 mi away | 749 students | 7 reviews
+    Contact the school or district directly to verify enrollment eligibility.
+  `, listingUrl);
+
+  assert.deepEqual(schools.map((school) => [school.name, school.rating, school.type, school.grades]), [
+    ["Amanda C Rowe School", 4, "elementary", "K-5"],
+    ["Lincoln Middle School", 6, "middle", "6-8"],
+    ["Deering High School", 2, "high", "9-12"],
+  ]);
+  assert.ok(schools.every((school) => school.relationship === "listing-associated"));
+  assert.equal(schools[0]?.sourceUrl, listingUrl);
+  assert.match(schools[1]?.sourceUrl || "", /Lincoln-Middle-School/);
+});
+
+test("keeps school panel evidence isolated to its own listing", () => {
+  const first = extractSchoolEvidence(`
+    ## Schools
+    4 10 4 out of 10 [Button: Amanda C Rowe School] Grades K-5
+    6 10 6 out of 10 [Button: Lincoln Middle School] Grades 6-8
+    2 10 2 out of 10 [Button: Deering High School] Grades 9-12
+  `, "https://www.realtor.com/realestateandhomes-detail/40-Webb-St");
+  const second = extractSchoolEvidence(`
+    ## Schools
+    8 10 8 out of 10 [Button: Different Academy] Grades K-5
+    7 10 7 out of 10 [Button: Other Middle School] Grades 6-8
+    9 10 9 out of 10 [Button: Other High School] Grades 9-12
+  `, "https://www.realtor.com/realestateandhomes-detail/1-Other-St");
+
+  assert.deepEqual(first.map((school) => school.name), [
+    "Amanda C Rowe School", "Lincoln Middle School", "Deering High School",
+  ]);
+  assert.deepEqual(second.map((school) => school.name), [
+    "Different Academy", "Other Middle School", "Other High School",
+  ]);
+  assert.ok(first.every((school) => /40-Webb-St/.test(school.assignmentSourceUrl || "")));
+  assert.ok(second.every((school) => /1-Other-St/.test(school.assignmentSourceUrl || "")));
+});
+
+test("classifies the complete 40 Webb Portland panel as failed instead of unresolved", () => {
+  const listingUrl = "https://www.realtor.com/realestateandhomes-detail/40-Webb-St_Portland_ME_04102_M35641-79717";
+  const schools = extractSchoolEvidence(`
+    ## Schools
+    4 10 4 out of 10 [Button: Amanda C Rowe School] Grades K-5
+    6 10 6 out of 10 [Button: Lincoln Middle School] Grades 6-8
+    2 10 2 out of 10 [Button: Deering High School] Grades 9-12
+  `, listingUrl);
+  const match = assessProperty({
+    id: "portland-40-webb",
+    title: "40 Webb St, Portland, ME 04102",
+    price: 399000,
+    bedrooms: 1,
+    bathrooms: 1,
+    sqft: 721,
+    location: "Portland, ME 04102",
+    features: [],
+    url: listingUrl,
+    listedAt: new Date().toISOString(),
+    source: "Realtor.com",
+    schools,
+  }, {
+    ...defaultSearchCriteria(),
+    location: "Portland, ME",
+    schoolMinRating: 5,
+    schoolAtLeastOneRating: 8,
+    schoolAssignmentRequired: true,
+  });
+
+  assert.equal(match.overall, "failed");
+  assert.equal(match.checks.find((check) => /K-12 schools/.test(check.criterion))?.status, "failed");
 });
 
 test("extracts property-associated schools from Realtor's server-rendered nearby-school links", () => {

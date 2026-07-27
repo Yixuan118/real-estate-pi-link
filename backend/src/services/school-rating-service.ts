@@ -30,6 +30,12 @@ export function extractSchoolEvidence(
   for (const school of extractEmbeddedSchoolJson(content, sourceUrl, evidenceSource)) {
     addOrMerge(found, school);
   }
+  // Realtor school names do not always contain a level word (for example,
+  // "Amanda C Rowe School"). Parse each visible rating card and infer its
+  // level from the adjacent Grades field.
+  for (const school of extractRealtorSchoolPanelCards(normalized, sourceUrl, evidenceSource)) {
+    addOrMerge(found, school);
+  }
   const namePattern = /"(?:name|school_name)"\s*:\s*"([^"<>]{3,160})"/gi;
   let match: RegExpExecArray | null;
 
@@ -161,7 +167,7 @@ export class SchoolRatingService {
   }
 
   async lookupSchool(name: string, location?: string): Promise<SchoolEvidence[]> {
-    return this.cached(`school:v4:${normalizeCacheKey(name)}:${normalizeCacheKey(location || "")}`, async () => {
+    return this.cached(`school:v5:${normalizeCacheKey(name)}:${normalizeCacheKey(location || "")}`, async () => {
       return this.searchExactSchool(name, location || "United States");
     });
   }
@@ -184,7 +190,7 @@ export class SchoolRatingService {
   }
 
   private async searchByProperty(address: string, location: string): Promise<SchoolEvidence[]> {
-    return this.cached(`property:v4:${normalizeCacheKey(address)}:${normalizeCacheKey(location)}`, () =>
+    return this.cached(`property:v5:${normalizeCacheKey(address)}:${normalizeCacheKey(location)}`, () =>
       this.searchExactPropertyListing(address, location));
   }
 
@@ -453,6 +459,63 @@ function inferSchoolType(name: string, context: string): SchoolEvidence["type"] 
   if (/middle|junior high|grades?\s*6\s*[-–]\s*8/.test(text)) return "middle";
   if (/high school|secondary|grades?\s*9\s*[-–]\s*12/.test(text)) return "high";
   return "other";
+}
+
+function inferSchoolTypeFromGrades(grades: string, name: string): SchoolEvidence["type"] {
+  const normalizedGrades = grades.toUpperCase().replace(/\s+/g, "").replace(/[–—]/g, "-");
+  if (/^(?:PK|PRE-K|K)-5$/.test(normalizedGrades)) return "elementary";
+  if (/^6-8$/.test(normalizedGrades)) return "middle";
+  if (/^9-12$/.test(normalizedGrades)) return "high";
+  if (/^(?:PK|PRE-K|K)-12$/.test(normalizedGrades)) return "k12";
+  return inferSchoolType(name, `Grades ${grades}`);
+}
+
+function extractRealtorSchoolPanelCards(
+  content: string,
+  listingUrl: string,
+  evidenceSource: SchoolEvidence["evidenceSource"],
+): SchoolEvidence[] {
+  // Firecrawl can represent a title as plain text, a Markdown link, or an
+  // accessibility label such as "[Button: Amanda C Rowe School]".
+  const readable = content
+    .replace(/\[Button:\s*([^\]]+)\]/gi, "$1")
+    .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)(?:\s+"[^"]*")?\)/g, "$1")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\s+/g, " ");
+  const found = new Map<string, SchoolEvidence>();
+  const cardPattern = /\b(\d{1,2})\s*(?:\/\s*)?10(?:\s+\1\s+out\s+of\s+10)?[\s|·•]{0,80}([A-Z][A-Za-z0-9'.&()\- ]{2,120}?(?:School|Academy|Institute))\s+Grades?\s+((?:PK|Pre-?K|K|\d{1,2})\s*[-–—]\s*(?:K|\d{1,2}))/gi;
+  let match: RegExpExecArray | null;
+
+  while ((match = cardPattern.exec(readable)) !== null) {
+    const rating = validRating(match[1]);
+    const name = cleanSchoolName(match[2]);
+    const grades = match[3].replace(/\s+/g, "");
+    if (!name || rating == null) continue;
+    const context = readable.slice(match.index, Math.min(readable.length, match.index + 420));
+    const linkPattern = new RegExp(
+      `\\[${escapeRegExp(name)}\\]\\((https?:\\/\\/[^)\\s]+)(?:\\s+"[^"]*")?\\)`,
+      "i",
+    );
+    const linkedUrl = content.match(linkPattern)?.[1];
+    addOrMerge(found, {
+      name,
+      rating,
+      scale: 10,
+      type: inferSchoolTypeFromGrades(grades, name),
+      grades,
+      distanceMiles: parseMetric(context, /([\d.]+)\s*mi(?:les?)?\s+away/i, 0, 100),
+      studentCount: parseMetric(context, /([\d,]+)\s+students?\b/i, 0, 1_000_000),
+      reviewCount: parseMetric(context, /([\d,]+)\s+reviews?\b/i, 0, 1_000_000),
+      ratingSource: "GreatSchools",
+      evidenceSource,
+      sourceUrl: linkedUrl || listingUrl,
+      relationship: evidenceSource === "realtor-listing" ? "listing-associated" : "nearby",
+      assignmentSource: evidenceSource === "realtor-listing" ? "realtor-listing" : undefined,
+      assignmentSourceUrl: evidenceSource === "realtor-listing" ? listingUrl : undefined,
+      checkedAt: new Date().toISOString(),
+    });
+  }
+  return [...found.values()];
 }
 
 function looksLikeSchool(name: string, context: string): boolean {
