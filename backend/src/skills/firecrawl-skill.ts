@@ -253,14 +253,15 @@ export class FirecrawlSkill {
       .slice(0, resultLimit)
       .map(addCoreDataDiagnostic);
     const needsListingDetail = requiresListingDetail(criteria);
-    // Realtor new-construction cards sometimes omit half baths. Verify only
-    // these high-risk cards against their own Realtor detail URL; never use a
-    // broad exact-address search that can confuse units in the same building.
+    // Realtor cards can expose a stale/incomplete bathroom total even for
+    // ordinary resale homes. Verify unresolved summaries against their own
+    // detail URL, prioritizing implausible bed/bath ratios and large homes.
     if (enrich && listingEvidenceSearchService.enabled && shouldVerifyBathroomsSeparately(criteria)) {
-      const limit = Math.max(0, Math.min(Number(process.env.RE_BATHROOM_VERIFY_LIMIT || 5), 10));
+      const limit = Math.max(0, Math.min(Number(process.env.RE_BATHROOM_VERIFY_LIMIT || 10), 20));
       const indexes = candidates.map((property, index) => ({ property, index }))
-        .filter(({ property }) => property.fullBathrooms == null && property.halfBathrooms == null
-          && property.features.some((feature) => /new construction/i.test(feature)))
+        .map((candidate) => ({ ...candidate, priority: bathroomVerificationPriority(candidate.property) }))
+        .filter(({ priority }) => priority > 0)
+        .sort((left, right) => right.priority - left.priority)
         .slice(0, limit);
       await mapWithConcurrency(indexes, 2, async ({ index }) => {
         try {
@@ -1153,6 +1154,17 @@ export function shouldVerifyBathroomsSeparately(criteria: SearchCriteria): boole
   // When a detail page is already required, its full/half bath fields are both
   // more authoritative and free of an extra exact-address Firecrawl search.
   return !requiresListingDetail(criteria);
+}
+
+export function bathroomVerificationPriority(property: Property): number {
+  if (!property.url || property.fullBathrooms != null || property.halfBathrooms != null) return 0;
+  let score = 1;
+  if (property.features.some((feature) => /new construction/i.test(feature))) score += 100;
+  if (property.bedrooms >= 5 && property.bathrooms <= 2.5) score += 90;
+  if (property.sqft >= 3000 && property.bathrooms <= 2.5) score += 80;
+  if (property.bedrooms >= 4) score += 30;
+  if (property.bathrooms > 0 && property.bathrooms < 2) score += 20;
+  return score;
 }
 
 export function extractInteractText(payload: unknown): string {

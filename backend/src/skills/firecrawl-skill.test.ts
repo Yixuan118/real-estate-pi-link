@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { extractCoreListingMetrics, extractPropertyEvidence } from "../core/property-matcher";
 import { defaultSearchCriteria, Property, UserSession } from "../core/types";
-import { canonicalMarketLocation, detailNeedsInteractiveExpansion, extractInteractText, FirecrawlSkill, isSchoolOnlyDetailRequest, prepareDetailEvidenceContent, prepareSearchPagePropertyEvidence, prioritizeCandidatesForCriteria, requiresListingDetail, resolveFeatureEnrichmentLimit, resolveFirecrawlBudget, selectCachedLiveProperties, shouldUseCachedMarket, shouldVerifyBathroomsSeparately } from "./firecrawl-skill";
+import { bathroomVerificationPriority, canonicalMarketLocation, detailNeedsInteractiveExpansion, extractInteractText, FirecrawlSkill, isSchoolOnlyDetailRequest, prepareDetailEvidenceContent, prepareSearchPagePropertyEvidence, prioritizeCandidatesForCriteria, requiresListingDetail, resolveFeatureEnrichmentLimit, resolveFirecrawlBudget, selectCachedLiveProperties, shouldUseCachedMarket, shouldVerifyBathroomsSeparately } from "./firecrawl-skill";
 
 test("caps the assessed result set at 20 properties", async () => {
   const properties: Property[] = Array.from({ length: 30 }, (_, index) => ({
@@ -117,6 +117,19 @@ test("stale low budget environment values cannot disable school detail enrichmen
 test("school detail pages replace redundant exact-address bathroom searches", () => {
   assert.equal(shouldVerifyBathroomsSeparately({ ...defaultSearchCriteria(), location: "Athens, GA", schoolMinRating: 5 }), false);
   assert.equal(shouldVerifyBathroomsSeparately({ ...defaultSearchCriteria(), location: "Seattle, WA", minBedrooms: 3 }), true);
+});
+
+test("suspicious large-home bathroom summaries are prioritized for exact detail verification", () => {
+  const base: Property = {
+    id: "creek", title: "155 Creek Plantation Dr, Athens, GA 30606", price: 995000,
+    bedrooms: 5, bathrooms: 2, sqft: 4712, location: "Athens, GA 30606",
+    features: [], url: "https://www.realtor.com/example",
+    listedAt: new Date().toISOString(), source: "Realtor.com",
+  };
+  assert.ok(bathroomVerificationPriority(base) > bathroomVerificationPriority({
+    ...base, id: "condo", bedrooms: 2, bathrooms: 2, sqft: 1176,
+  }));
+  assert.equal(bathroomVerificationPriority({ ...base, fullBathrooms: 4, halfBathrooms: 1 }), 0);
 });
 
 test("Interact object and JSON-string results preserve the Neighborhood and schools text", () => {
