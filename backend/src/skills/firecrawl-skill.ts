@@ -257,7 +257,7 @@ export class FirecrawlSkill {
     // ordinary resale homes. Verify unresolved summaries against their own
     // detail URL, prioritizing implausible bed/bath ratios and large homes.
     if (enrich && listingEvidenceSearchService.enabled && shouldVerifyBathroomsSeparately(criteria)) {
-      const limit = Math.max(0, Math.min(Number(process.env.RE_BATHROOM_VERIFY_LIMIT || 10), 20));
+      const limit = Math.max(0, Math.min(Number(process.env.RE_BATHROOM_VERIFY_LIMIT || 5), 10));
       const indexes = candidates.map((property, index) => ({ property, index }))
         .map((candidate) => ({ ...candidate, priority: bathroomVerificationPriority(candidate.property) }))
         .filter(({ priority }) => priority > 0)
@@ -1235,10 +1235,10 @@ export function bathroomVerificationPriority(property: Property): number {
   // consumer total. Card-confirmed values start lower but are still checked
   // when the bed/bath ratio is suspicious.
   let score = property.bathroomsSource === "listing-card" ? 0 : 50;
-  if (property.features.some((feature) => /new construction/i.test(feature))) score += 100;
+  if (property.features.some((feature) => /new construction/i.test(feature))
+      && property.bathrooms <= 2) score += 100;
   if (property.bedrooms >= 5 && property.bathrooms <= 2.5) score += 90;
   if (property.sqft >= 3000 && property.bathrooms <= 2.5) score += 80;
-  if (property.bedrooms >= 4) score += 30;
   if (property.bathrooms > 0 && property.bathrooms < 2) score += 20;
   return score;
 }

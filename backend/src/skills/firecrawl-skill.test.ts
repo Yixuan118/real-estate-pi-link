@@ -127,8 +127,16 @@ test("suspicious large-home bathroom summaries are prioritized for exact detail 
     listedAt: new Date().toISOString(), source: "Realtor.com",
   };
   assert.ok(bathroomVerificationPriority(base) > bathroomVerificationPriority({
-    ...base, id: "condo", bedrooms: 2, bathrooms: 2, sqft: 1176,
+    ...base, id: "condo", bedrooms: 2, bathrooms: 2, bathroomsSource: "listing-card", sqft: 1176,
   }));
+  assert.equal(bathroomVerificationPriority({
+    ...base, id: "normal-card", bedrooms: 4, bathrooms: 3,
+    bathroomsSource: "listing-card", sqft: 2595,
+  }), 0);
+  assert.ok(bathroomVerificationPriority({
+    ...base, id: "incomplete-new-card", bedrooms: 2, bathrooms: 1.5,
+    bathroomsSource: "listing-card", sqft: 1863, features: ["new construction"],
+  }) > 0);
   assert.equal(bathroomVerificationPriority({ ...base, fullBathrooms: 4, halfBathrooms: 1 }), 0);
 });
 
