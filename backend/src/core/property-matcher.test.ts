@@ -139,16 +139,29 @@ test("extracts a GA-316 nearest-access driving constraint", () => {
   assert.deepEqual(result.criteria.highwayAccess, { highwayName: "GA-316", maxMiles: 3 });
 });
 
-test("extracts natural English assigned K-12 compound rating criteria", () => {
-  const result = regexExtract(
-    "Find homes in Atlanta with assigned K–12 schools all rated at least 5/10 with at least one rated 8/10.",
-    defaultSearchCriteria(),
-  );
-  assert.equal(result.criteria.location, "Atlanta");
-  assert.equal(result.criteria.schoolMinRating, 5);
-  assert.equal(result.criteria.schoolAtLeastOneRating, 8);
-  assert.equal(result.criteria.schoolAssignmentRequired, true);
-  assert.equal(result.criteria.schoolAlternativePolicy, "any-eligible-option");
+test("extracts the same assigned K-12 rule independently of any US city", () => {
+  const markets = [
+    ["Atlanta", "Atlanta"],
+    ["Boston, MA", "Boston, MA"],
+    ["San Francisco, CA", "San Francisco, CA"],
+    ["Portland, ME", "Portland, ME"],
+    ["Athens, OH", "Athens, OH"],
+    ["Kansas City, MO", "Kansas City, MO"],
+    ["Coeur d'Alene, ID", "Coeur d'Alene, ID"],
+    ["Truth or Consequences, NM", "Truth or Consequences, NM"],
+    ["Washington, DC", "Washington, DC"],
+  ];
+  for (const [market, expectedLocation] of markets) {
+    const result = regexExtract(
+      `Find homes in ${market} with assigned K–12 schools all rated at least 5/10 with at least one rated 8/10.`,
+      defaultSearchCriteria(),
+    );
+    assert.equal(result.criteria.location, expectedLocation, market);
+    assert.equal(result.criteria.schoolMinRating, 5, market);
+    assert.equal(result.criteria.schoolAtLeastOneRating, 8, market);
+    assert.equal(result.criteria.schoolAssignmentRequired, true, market);
+    assert.equal(result.criteria.schoolAlternativePolicy, "any-eligible-option", market);
+  }
 });
 
 test("verifies basic location and bedroom criteria instead of marking every result unknown", () => {
