@@ -74,9 +74,8 @@ export class FirecrawlSkill {
       }
 
       // Version the cache whenever core metric normalization changes.
-      // v6 invalidates records whose base metrics came from the old
-      // address-window parser or contained a literal "null" ZIP code.
-      const cacheKey = `v6:${targetUrl.toLowerCase()}`;
+      // v7 invalidates records created before visible-card HTML normalization.
+      const cacheKey = `v7:${targetUrl.toLowerCase()}`;
       const cachedMarket = this.listingCache.get(cacheKey);
       // A basic market cache normally contains only the first result page.
       // Feature searches intentionally inspect additional pages so likely
@@ -742,7 +741,11 @@ export class FirecrawlSkill {
     } catch (e: any) {
       console.log("[FirecrawlSkill] JSON-LD parse error:", e.message);
     }
-    this.enrichBathroomsFromMarkdown(props, `${markdown || ""}\n${raw}`);
+    // Parse visible card text, not raw tag attributes or embedded JSON. Realtor
+    // places very large CSS class strings between a card's metrics and address;
+    // stripping markup keeps the exact card fields adjacent and prevents the
+    // incomplete SEO JSON-LD bath total from winning.
+    this.enrichBathroomsFromMarkdown(props, `${markdown || ""}\n${htmlToVisibleSearchText(raw)}`);
     return props;
   }
 
@@ -1351,6 +1354,19 @@ function extractStructuredSqft(listing: any): number {
 function cleanSchemaText(value: unknown): string {
   const text = String(value ?? "").trim();
   return /^(?:null|undefined|n\/a)$/i.test(text) ? "" : text;
+}
+
+function htmlToVisibleSearchText(html: string): string {
+  return html
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;|&#160;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&#x27;|&#39;/gi, "'")
+    .replace(/&quot;|&#34;/gi, "\"")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function normalizePropertyAddress(property: Property): string {

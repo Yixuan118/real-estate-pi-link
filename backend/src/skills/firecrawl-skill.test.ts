@@ -461,9 +461,8 @@ test("Realtor card metrics rendered before the address override incomplete JSON-
   }];
   const raw = [
     `<script data-testid="seoLinkingData">${JSON.stringify(jsonLd)}</script>`,
-    "$699,000 4bed 3.5bath 2,984sqft",
-    "x".repeat(220),
-    "1020 Ramser Dr Athens, GA Email agent",
+    `<article>$699,000 4bed 3.5bath 2,984sqft`,
+    `<a class="${"x".repeat(5000)}">1020 Ramser Dr Athens, GA</a> Email agent</article>`,
   ].join(" ");
   const result = (new FirecrawlSkill() as any).parsePropertiesFromHtml(raw, defaultSearchCriteria(), "");
   assert.equal(result.length, 1);
