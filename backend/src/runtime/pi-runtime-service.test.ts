@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { defaultSearchCriteria, Property } from "../core/types";
-import { formatListingRetrievalError, piRuntimeService, PiRuntimeResult } from "./pi-runtime-service";
+import { formatListingRetrievalError, parsePiRuntimeJson, piRuntimeService, PiRuntimeResult } from "./pi-runtime-service";
 
 test("Pi activity and ranking are replaced with deterministic evidence results", () => {
   const result: PiRuntimeResult = {
@@ -29,6 +29,22 @@ test("location errors do not tell the user to troubleshoot Firecrawl", () => {
   assert.match(message, /US housing markets only/i);
   assert.match(message, /City, ST/i);
   assert.doesNotMatch(message, /Firecrawl|API key|quota/i);
+});
+
+test("malformed collaborator JSON falls back to deterministic property analysis", () => {
+  const malformed = '{"assistant_message":"partial","ranked_property_ids":["one" "two"],"warnings":[]}';
+  assert.throws(() => parsePiRuntimeJson(malformed), /Expected ',' or ']'/);
+
+  const result = (piRuntimeService as any).parseJsonOrFallback(malformed) as PiRuntimeResult;
+  (piRuntimeService as any).applyDeterministicCollaboration(result, [
+    candidate("boston-home", 900000, "verified", 100),
+  ], {
+    ...defaultSearchCriteria(), location: "Boston, MA", maxPrice: 1000000, minBedrooms: 3,
+  });
+
+  assert.equal(result.assistant_message, "Analyzed 1 properties: 1 verified, 0 unknown, 0 failed.");
+  assert.deepEqual(result.ranked_property_ids, ["boston-home"]);
+  assert.equal(result.agent_activity.length, 4);
 });
 
 function candidate(id: string, price: number, overall: "verified" | "unknown" | "failed", score: number): Property {

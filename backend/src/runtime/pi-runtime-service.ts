@@ -135,7 +135,7 @@ class PiRuntimeService {
       "}",
     ].join("\n");
     const raw = await this.callLLM(fullPrompt);
-    const result = this.parseJson(raw);
+    const result = this.parseJsonOrFallback(raw);
     this.applyDeterministicCollaboration(result, (input.properties || []).slice(0, 20) as Property[], input.criteria as SearchCriteria);
     if (scrapeWarning) {
       result.warnings.push(scrapeWarning);
@@ -230,30 +230,50 @@ private async callLLM(prompt: string): Promise<string> {
     return "Firecrawl Real Estate Scraper skill for property scraping.";
   }
 
-  private parseJson(raw: string): PiRuntimeResult {
-    const start = raw.indexOf("{");
-    const end = raw.lastIndexOf("}");
-
-    if (start === -1 || end === -1 || end <= start) {
-      throw new Error("Pi did not return valid JSON. Raw output: " + raw.slice(0, 500));
+  private parseJsonOrFallback(raw: string): PiRuntimeResult {
+    try {
+      return parsePiRuntimeJson(raw);
+    } catch (error) {
+      // The model's prose is advisory: property evidence, ranking, activity, and
+      // the final summary are rebuilt deterministically immediately afterward.
+      // A missing comma or truncated array must therefore never fail the search
+      // or trigger another paid model/scrape request.
+      console.warn("[PiRuntime] Ignoring malformed collaborator JSON:", error instanceof Error ? error.message : String(error));
+      return emptyPiRuntimeResult();
     }
-
-    const parsed = JSON.parse(raw.slice(start, end + 1));
-
-    return {
-      assistant_message:
-        typeof parsed.assistant_message === "string"
-          ? parsed.assistant_message
-          : "Pi collaborating agents completed the analysis.",
-      agent_activity: Array.isArray(parsed.agent_activity)
-        ? parsed.agent_activity
-        : [],
-      ranked_property_ids: Array.isArray(parsed.ranked_property_ids)
-        ? parsed.ranked_property_ids
-        : [],
-      warnings: Array.isArray(parsed.warnings) ? parsed.warnings : [],
-    };
   }
+}
+
+export function parsePiRuntimeJson(raw: string): PiRuntimeResult {
+  const start = raw.indexOf("{");
+  const end = raw.lastIndexOf("}");
+  if (start === -1 || end === -1 || end <= start) {
+    throw new Error("Pi did not return a JSON object.");
+  }
+
+  const parsed = JSON.parse(raw.slice(start, end + 1));
+  return {
+    assistant_message:
+      typeof parsed.assistant_message === "string"
+        ? parsed.assistant_message
+        : "Pi collaborating agents completed the analysis.",
+    agent_activity: Array.isArray(parsed.agent_activity)
+      ? parsed.agent_activity
+      : [],
+    ranked_property_ids: Array.isArray(parsed.ranked_property_ids)
+      ? parsed.ranked_property_ids
+      : [],
+    warnings: Array.isArray(parsed.warnings) ? parsed.warnings : [],
+  };
+}
+
+function emptyPiRuntimeResult(): PiRuntimeResult {
+  return {
+    assistant_message: "Pi collaborating agents completed the analysis.",
+    agent_activity: [],
+    ranked_property_ids: [],
+    warnings: [],
+  };
 }
 
 export function formatListingRetrievalError(source: string, error: string): string {
