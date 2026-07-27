@@ -440,6 +440,46 @@ test("rendered Realtor summary overrides incomplete JSON-LD bathroom totals", ()
   );
 });
 
+test("Realtor card metrics rendered before the address override incomplete JSON-LD totals", () => {
+  const jsonLd = [{
+    "@type": "CollectionPage",
+    mainEntity: { itemListElement: [{
+      "@type": "RealEstateListing",
+      name: "1020 Ramser Dr, Athens, GA null",
+      url: "https://www.realtor.com/ramser",
+      offers: { price: "699000" },
+      mainEntity: {
+        numberOfBedrooms: 4,
+        numberOfBathrooms: 2,
+        floorSize: { value: 2984 },
+        address: {
+          streetAddress: "1020 Ramser Dr", addressLocality: "Athens",
+          addressRegion: "GA", postalCode: "null",
+        },
+      },
+    }] },
+  }];
+  const raw = [
+    `<script data-testid="seoLinkingData">${JSON.stringify(jsonLd)}</script>`,
+    "$699,000 4bed 3.5bath 2,984sqft",
+    "x".repeat(220),
+    "1020 Ramser Dr Athens, GA Email agent",
+  ].join(" ");
+  const result = (new FirecrawlSkill() as any).parsePropertiesFromHtml(raw, defaultSearchCriteria(), "");
+  assert.equal(result.length, 1);
+  assert.deepEqual(
+    {
+      title: result[0].title, location: result[0].location,
+      bedrooms: result[0].bedrooms, bathrooms: result[0].bathrooms,
+      sqft: result[0].sqft, bathroomsSource: result[0].bathroomsSource,
+    },
+    {
+      title: "1020 Ramser Dr, Athens, GA", location: "Athens, GA",
+      bedrooms: 4, bathrooms: 3.5, sqft: 2984, bathroomsSource: "listing-card",
+    },
+  );
+});
+
 test("preserves Realtor full and half bathroom fields using the consumer-facing fractional total", () => {
   const jsonLd = [{
     "@type": "CollectionPage",

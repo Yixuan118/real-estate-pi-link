@@ -46,6 +46,7 @@ export interface Property {
   bathrooms: number;
   fullBathrooms?: number;
   halfBathrooms?: number;
+  bathroomsSource?: "structured-data" | "listing-card" | "detail-page" | "cached";
   sqft: number;
   sqftSource?: "structured-data" | "listing-card" | "detail-page" | "cached";
   location: string;

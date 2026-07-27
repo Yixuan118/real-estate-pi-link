@@ -115,6 +115,7 @@ export function extractPropertyEvidence(property: Property, content: string): Pr
     ...property,
     bedrooms: coreMetrics.bedrooms ?? property.bedrooms,
     bathrooms: coreMetrics.bathrooms ?? property.bathrooms,
+    bathroomsSource: hasCurrentBathroomTotal ? "detail-page" : property.bathroomsSource,
     // A newly extracted total without a matching breakdown must clear a stale
     // full/half split. Otherwise an old "2 full + 1 half" can survive after
     // the exact property page has established a total of 2.

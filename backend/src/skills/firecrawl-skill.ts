@@ -74,8 +74,9 @@ export class FirecrawlSkill {
       }
 
       // Version the cache whenever core metric normalization changes.
-      // v5 invalidates records created before property-scoped bath extraction.
-      const cacheKey = `v5:${targetUrl.toLowerCase()}`;
+      // v6 invalidates records whose base metrics came from the old
+      // address-window parser or contained a literal "null" ZIP code.
+      const cacheKey = `v6:${targetUrl.toLowerCase()}`;
       const cachedMarket = this.listingCache.get(cacheKey);
       // A basic market cache normally contains only the first result page.
       // Feature searches intentionally inspect additional pages so likely
@@ -708,10 +709,16 @@ export class FirecrawlSkill {
         if (priceVal < 50000 || priceVal > 50000000) continue;
         const bedroomVal = parseInt(me.numberOfBedrooms) || 0;
         const sqftVal = extractStructuredSqft(me);
-        const street = address.streetAddress || "";
-        const city = address.addressLocality || "";
-        const state = address.addressRegion || "";
-        const zip = address.postalCode || "";
+        const street = cleanSchemaText(address.streetAddress);
+        const city = cleanSchemaText(address.addressLocality);
+        const state = cleanSchemaText(address.addressRegion);
+        const zipCandidate = cleanSchemaText(address.postalCode);
+        const zip = /^\d{5}(?:-\d{4})?$/.test(zipCandidate) ? zipCandidate : "";
+        const canonicalTitle = [
+          street,
+          city,
+          [state, zip].filter(Boolean).join(" "),
+        ].filter(Boolean).join(", ");
         const imageUrl = listing.image || "";
         const url = listing.url || "";
         const geo = me.geo || listing.geo || {};
@@ -720,8 +727,9 @@ export class FirecrawlSkill {
         const halfBathrooms = firstPositiveNumber(me.numberOfHalfBathrooms, me.bathroomsHalf);
         props.push({
           id: "r" + (i + 1),
-          title: listing.name || street || (city ? "Home in " + city : bedroomVal + "BR Home"),
-          price: priceVal, bedrooms: bedroomVal, bathrooms, fullBathrooms, halfBathrooms, sqft: sqftVal,
+          title: canonicalTitle || cleanSchemaText(listing.name) || (city ? "Home in " + city : bedroomVal + "BR Home"),
+          price: priceVal, bedrooms: bedroomVal, bathrooms, fullBathrooms, halfBathrooms,
+          bathroomsSource: bathrooms > 0 ? "structured-data" : undefined, sqft: sqftVal,
           sqftSource: sqftVal > 0 ? "structured-data" : undefined,
           location: city ? city + ", " + state + (zip ? " " + zip : "") : state, features: [],
           url: url, imageUrl: imageUrl,
@@ -752,11 +760,17 @@ export class FirecrawlSkill {
       // Realtor's rendered search payload commonly uses label-first text such
       // as "beds 2 baths 2 sqft square feet 1,570". Match it inside the exact
       // address window before falling back to the older price-card heuristic.
-      const metrics = extractCoreListingMetrics(propertyEvidence, prop.title);
+      // The evidence string is already bounded to this exact address. Prefix
+      // the identity so metrics rendered before the address (Realtor's common
+      // card order) remain inside the property-scoped extractor window.
+      const metrics = extractCoreListingMetrics(`${prop.title}\n${propertyEvidence}`, prop.title);
       if (metrics.bedrooms != null) prop.bedrooms = metrics.bedrooms;
-      if (metrics.bathrooms != null) prop.bathrooms = metrics.bathrooms;
-      if (metrics.fullBathrooms != null) prop.fullBathrooms = metrics.fullBathrooms;
-      if (metrics.halfBathrooms != null) prop.halfBathrooms = metrics.halfBathrooms;
+      if (metrics.bathrooms != null) {
+        prop.bathrooms = metrics.bathrooms;
+        prop.fullBathrooms = metrics.fullBathrooms;
+        prop.halfBathrooms = metrics.halfBathrooms;
+        prop.bathroomsSource = "listing-card";
+      }
       if (metrics.sqft != null) {
         prop.sqft = metrics.sqft;
         prop.sqftSource = metrics.sqftSource;
@@ -1157,8 +1171,13 @@ export function shouldVerifyBathroomsSeparately(criteria: SearchCriteria): boole
 }
 
 export function bathroomVerificationPriority(property: Property): number {
-  if (!property.url || property.fullBathrooms != null || property.halfBathrooms != null) return 0;
-  let score = 1;
+  if (!property.url || property.bathroomsSource === "detail-page"
+      || property.fullBathrooms != null || property.halfBathrooms != null) return 0;
+  // A structured JSON-LD total is provisional because Realtor sometimes
+  // publishes only full baths there while the visible card has the fractional
+  // consumer total. Card-confirmed values start lower but are still checked
+  // when the bed/bath ratio is suspicious.
+  let score = property.bathroomsSource === "listing-card" ? 0 : 50;
   if (property.features.some((feature) => /new construction/i.test(feature))) score += 100;
   if (property.bedrooms >= 5 && property.bathrooms <= 2.5) score += 90;
   if (property.sqft >= 3000 && property.bathrooms <= 2.5) score += 80;
@@ -1289,6 +1308,7 @@ function repairCachedCoreMetrics(property: Property): Property {
     features,
     bedrooms: metrics.bedrooms ?? property.bedrooms,
     bathrooms: metrics.bathrooms ?? property.bathrooms,
+    bathroomsSource: hasCurrentBathroomTotal ? "cached" : property.bathroomsSource,
     fullBathrooms: hasCurrentBathroomTotal ? metrics.fullBathrooms : property.fullBathrooms,
     halfBathrooms: hasCurrentBathroomTotal ? metrics.halfBathrooms : property.halfBathrooms,
     sqft: metrics.sqft ?? property.sqft,
@@ -1326,6 +1346,11 @@ function extractStructuredSqft(listing: any): number {
     if (Number.isFinite(parsed) && parsed > 100 && parsed < 100000) return Math.round(parsed);
   }
   return 0;
+}
+
+function cleanSchemaText(value: unknown): string {
+  const text = String(value ?? "").trim();
+  return /^(?:null|undefined|n\/a)$/i.test(text) ? "" : text;
 }
 
 function normalizePropertyAddress(property: Property): string {
