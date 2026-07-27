@@ -137,6 +137,11 @@ test("suspicious large-home bathroom summaries are prioritized for exact detail 
     ...base, id: "incomplete-new-card", bedrooms: 2, bathrooms: 1.5,
     bathroomsSource: "listing-card", sqft: 1863, features: ["new construction"],
   }) > 0);
+  assert.ok(bathroomVerificationPriority({
+    ...base, id: "missing-zip", title: "1020 Ramser Dr, Athens, GA",
+    location: "Athens, GA", bedrooms: 4, bathrooms: 2.5,
+    bathroomsSource: "listing-card", sqft: 2984,
+  }) > 0);
   assert.equal(bathroomVerificationPriority({ ...base, fullBathrooms: 4, halfBathrooms: 1 }), 0);
 });
 

@@ -1235,6 +1235,7 @@ export function bathroomVerificationPriority(property: Property): number {
   // consumer total. Card-confirmed values start lower but are still checked
   // when the bed/bath ratio is suspicious.
   let score = property.bathroomsSource === "listing-card" ? 0 : 50;
+  if (!/\b\d{5}(?:-\d{4})?\b/.test(`${property.title} ${property.location}`)) score += 120;
   if (property.features.some((feature) => /new construction/i.test(feature))
       && property.bathrooms <= 2) score += 100;
   if (property.bedrooms >= 5 && property.bathrooms <= 2.5) score += 90;
