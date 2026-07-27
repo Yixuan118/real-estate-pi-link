@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { extractCoreListingMetrics, extractPropertyEvidence } from "../core/property-matcher";
 import { defaultSearchCriteria, Property, UserSession } from "../core/types";
-import { bathroomVerificationPriority, canonicalMarketLocation, detailNeedsInteractiveExpansion, extractInteractText, FirecrawlSkill, isSchoolOnlyDetailRequest, prepareDetailEvidenceContent, prepareSearchPagePropertyEvidence, prioritizeCandidatesForCriteria, requiresListingDetail, resolveFeatureEnrichmentLimit, resolveFirecrawlBudget, selectCachedLiveProperties, shouldUseCachedMarket, shouldVerifyBathroomsSeparately } from "./firecrawl-skill";
+import { bathroomVerificationPriority, canonicalMarketLocation, detailNeedsInteractiveExpansion, extractInteractText, extractVisibleSearchCardMetrics, FirecrawlSkill, isSchoolOnlyDetailRequest, prepareDetailEvidenceContent, prepareSearchPagePropertyEvidence, prioritizeCandidatesForCriteria, requiresListingDetail, resolveFeatureEnrichmentLimit, resolveFirecrawlBudget, selectCachedLiveProperties, shouldUseCachedMarket, shouldVerifyBathroomsSeparately } from "./firecrawl-skill";
 
 test("caps the assessed result set at 20 properties", async () => {
   const properties: Property[] = Array.from({ length: 30 }, (_, index) => ({
@@ -249,6 +249,28 @@ test("same-price listings cannot donate bathroom metrics to another address", ()
   assert.equal(metrics.bathrooms, 4.5);
   assert.equal(metrics.sqft, 4712);
   assert.doesNotMatch(evidence, /10 Other St/);
+});
+
+test("visible Realtor cards keep each address bound to one complete metric group", () => {
+  const content = [
+    "4bed 2bath 1,838sqft Ibis Plan, Elmwood Park Community Athens, GA 30606",
+    "$439,900 3bed 2.5bath 2,438sqft 213 Overcup Ct Athens, GA 30606 Email agent",
+    "$475,000 4bed 3bath 2,595sqft 390 N Chase St Athens, GA 30606 Email agent",
+    "$699,000 4bed 3.5bath 2,984sqft 1020 Ramser Dr Athens, GA Email agent",
+    "$335,000 3bed 2bath 1,658sqft 115 S Arcadia Dr Bogart, GA 30622",
+  ].join(" ");
+  assert.deepEqual(
+    extractVisibleSearchCardMetrics(content, "213 Overcup Ct, Athens, GA 30606"),
+    { bedrooms: 3, bathrooms: 2.5, sqft: 2438, sqftSource: "listing-card" },
+  );
+  assert.deepEqual(
+    extractVisibleSearchCardMetrics(content, "390 N Chase St, Athens, GA 30606"),
+    { bedrooms: 4, bathrooms: 3, sqft: 2595, sqftSource: "listing-card" },
+  );
+  assert.deepEqual(
+    extractVisibleSearchCardMetrics(content, "1020 Ramser Dr, Athens, GA"),
+    { bedrooms: 4, bathrooms: 3.5, sqft: 2984, sqftSource: "listing-card" },
+  );
 });
 
 test("bounded pagination supplements a heavily filtered first page without merging distinct units", async () => {

@@ -74,8 +74,8 @@ export class FirecrawlSkill {
       }
 
       // Version the cache whenever core metric normalization changes.
-      // v7 invalidates records created before visible-card HTML normalization.
-      const cacheKey = `v7:${targetUrl.toLowerCase()}`;
+      // v8 invalidates records created before nearest complete-card matching.
+      const cacheKey = `v8:${targetUrl.toLowerCase()}`;
       const cachedMarket = this.listingCache.get(cacheKey);
       // A basic market cache normally contains only the first result page.
       // Feature searches intentionally inspect additional pages so likely
@@ -766,7 +766,8 @@ export class FirecrawlSkill {
       // The evidence string is already bounded to this exact address. Prefix
       // the identity so metrics rendered before the address (Realtor's common
       // card order) remain inside the property-scoped extractor window.
-      const metrics = extractCoreListingMetrics(`${prop.title}\n${propertyEvidence}`, prop.title);
+      const metrics = extractVisibleSearchCardMetrics(normalized, prop.title)
+        || extractCoreListingMetrics(`${prop.title}\n${propertyEvidence}`, prop.title);
       if (metrics.bedrooms != null) prop.bedrooms = metrics.bedrooms;
       if (metrics.bathrooms != null) {
         prop.bathrooms = metrics.bathrooms;
@@ -1032,6 +1033,59 @@ export function prepareSearchPagePropertyEvidence(
     propertyTitle,
     price,
   );
+}
+
+export function extractVisibleSearchCardMetrics(
+  content: string,
+  propertyTitle: string,
+): ReturnType<typeof extractCoreListingMetrics> | undefined {
+  const normalized = content.replace(/\s+/g, " ");
+  const lower = normalized.toLowerCase();
+  const address = propertyTitle.split(",")[0].trim().toLowerCase();
+  if (!address) return undefined;
+  const metricPattern = /(\d+(?:\.\d+)?)\s*(?:beds?|bd)\b[\s\S]{0,500}?(\d+(?:\.\d+)?)\s*(?:baths?|ba)\b[\s\S]{0,500}?([\d,]{3,})\s*(?:sqft|square\s+feet)\b/gi;
+  let best: { distance: number; metrics: ReturnType<typeof extractCoreListingMetrics> } | undefined;
+  let from = 0;
+  for (let occurrence = 0; occurrence < 12; occurrence++) {
+    const addressIndex = lower.indexOf(address, from);
+    if (addressIndex < 0) break;
+    const beforeStart = Math.max(0, addressIndex - 2200);
+    const before = normalized.slice(beforeStart, addressIndex);
+    const beforeMatches = [...before.matchAll(metricPattern)];
+    const preceding = beforeMatches.at(-1);
+    if (preceding?.index != null) {
+      const distance = addressIndex - (beforeStart + preceding.index + preceding[0].length);
+      if (distance <= 900 && (!best || distance < best.distance)) {
+        best = {
+          distance,
+          metrics: {
+            bedrooms: Number(preceding[1]),
+            bathrooms: Number(preceding[2]),
+            sqft: Number(preceding[3].replace(/,/g, "")),
+            sqftSource: "listing-card",
+          },
+        };
+      }
+    }
+    const after = normalized.slice(addressIndex + address.length, addressIndex + address.length + 2200);
+    const following = [...after.matchAll(metricPattern)][0];
+    if (following?.index != null) {
+      const distance = following.index;
+      if (distance <= 900 && (!best || distance < best.distance)) {
+        best = {
+          distance,
+          metrics: {
+            bedrooms: Number(following[1]),
+            bathrooms: Number(following[2]),
+            sqft: Number(following[3].replace(/,/g, "")),
+            sqftSource: "listing-card",
+          },
+        };
+      }
+    }
+    from = addressIndex + address.length;
+  }
+  return best?.metrics;
 }
 
 function propertyEvidenceFromNormalizedSearchPage(
