@@ -139,6 +139,18 @@ test("extracts a GA-316 nearest-access driving constraint", () => {
   assert.deepEqual(result.criteria.highwayAccess, { highwayName: "GA-316", maxMiles: 3 });
 });
 
+test("extracts natural English assigned K-12 compound rating criteria", () => {
+  const result = regexExtract(
+    "Find homes in Atlanta with assigned K–12 schools all rated at least 5/10 with at least one rated 8/10.",
+    defaultSearchCriteria(),
+  );
+  assert.equal(result.criteria.location, "Atlanta");
+  assert.equal(result.criteria.schoolMinRating, 5);
+  assert.equal(result.criteria.schoolAtLeastOneRating, 8);
+  assert.equal(result.criteria.schoolAssignmentRequired, true);
+  assert.equal(result.criteria.schoolAlternativePolicy, "any-eligible-option");
+});
+
 test("verifies basic location and bedroom criteria instead of marking every result unknown", () => {
   const property: Property = {
     id: "basic-1", title: "Seattle home", price: 650000, bedrooms: 3, bathrooms: 2, sqft: 1600,

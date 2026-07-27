@@ -287,7 +287,8 @@ export function regexExtract(input: string, current: SearchCriteria): { criteria
     }
   }
 
-  const compoundSchoolMatch = normalizedInput.match(/(?:评分)?(?:均|全部)\s*(?:不低于|至少|>=)\s*(\d{1,2})[^。]{0,60}(?:其中)?(?:至少[一1]所|其中[一1]所)\s*(?:评分)?\s*(?:不低于|至少|>=)\s*(\d{1,2})/i)
+  const compoundSchoolMatch = normalizedInput.match(/\bschools?\b[^.\d]{0,50}(?:at least|>=)\s*(\d{1,2})(?:\s*\/\s*10)?[^.]{0,80}\bat least one(?:\s+school)?\b[^.\d]{0,30}(?:rated?|scored?)?\s*(?:(?:at least|>=)\s*)?(\d{1,2})(?:\s*\/\s*10)?/i)
+    || normalizedInput.match(/(?:评分)?(?:均|全部)\s*(?:不低于|至少|>=)\s*(\d{1,2})[^。]{0,60}(?:其中)?(?:至少[一1]所|其中[一1]所)\s*(?:评分)?\s*(?:不低于|至少|>=)\s*(\d{1,2})/i)
     || normalizedInput.match(/(?:all\s+)?schools?[^.\d]{0,30}(?:at least|>=)\s*(\d{1,2})[^.]{0,60}(?:at least one|one school)[^.\d]{0,20}(?:at least|>=)\s*(\d{1,2})/i);
   if (compoundSchoolMatch) {
     const minimum = Number(compoundSchoolMatch[1]);
@@ -296,6 +297,7 @@ export function regexExtract(input: string, current: SearchCriteria): { criteria
       criteria.schoolMinRating = minimum;
       criteria.schoolAtLeastOneRating = atLeastOne;
       criteria.schoolAssignmentRequired = /所在(?:的)?|划片|对口|assigned|zoned/i.test(normalizedInput);
+      criteria.schoolAlternativePolicy = current.schoolAlternativePolicy || "any-eligible-option";
       changes.push(`K-12 ratings all ≥ ${minimum}/10 and at least one ≥ ${atLeastOne}/10`);
     }
   }
