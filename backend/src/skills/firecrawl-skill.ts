@@ -258,29 +258,39 @@ export class FirecrawlSkill {
     // detail URL, prioritizing implausible bed/bath ratios and large homes.
     if (enrich && listingEvidenceSearchService.enabled && shouldVerifyBathroomsSeparately(criteria)) {
       const limit = Math.max(0, Math.min(Number(process.env.RE_BATHROOM_VERIFY_LIMIT || 5), 10));
+      const verificationTimeouts = resolveBathroomVerificationTimeouts();
+      const batchController = new AbortController();
+      const batchTimer = setTimeout(() => batchController.abort(), verificationTimeouts.batchMs);
       const indexes = candidates.map((property, index) => ({ property, index }))
         .map((candidate) => ({ ...candidate, priority: bathroomVerificationPriority(candidate.property) }))
         .filter(({ priority }) => priority > 0)
         .sort((left, right) => right.priority - left.priority)
         .slice(0, limit);
-      await mapWithConcurrency(indexes, 2, async ({ index }) => {
-        try {
-          const property = candidates[index];
-          if (!property.url) return;
-          const url = property.url.startsWith("http") ? property.url : `https://www.realtor.com${property.url.startsWith("/") ? "" : "/"}${property.url}`;
-          const detail = await this.scrapeDetail(url, false, false);
-          const enriched = extractPropertyEvidence(property, prepareDetailEvidenceContent(
-            detail.markdown, detail.rawHtml, criteria, property.title,
-          ));
-          const verified = enriched.bathrooms > 0;
-          candidates[index] = addDiagnostic(enriched, "listing-search", verified ? "success" : "warning", verified
-            ? `Bathroom total verified from the exact Realtor property page: ${enriched.bathrooms} baths${enriched.fullBathrooms != null ? ` (${enriched.fullBathrooms} full, ${enriched.halfBathrooms || 0} half)` : ""}.`
-            : "The exact Realtor property page did not provide a usable bathroom total.");
-        } catch (error) {
-          candidates[index] = addDiagnostic(candidates[index], "listing-search", "warning",
-            `Exact Realtor bathroom verification failed: ${error instanceof Error ? error.message : String(error)}`);
-        }
-      });
+      try {
+        await mapWithConcurrency(indexes, 2, async ({ index }) => {
+          try {
+            if (batchController.signal.aborted) return;
+            const property = candidates[index];
+            if (!property.url) return;
+            const url = property.url.startsWith("http") ? property.url : `https://www.realtor.com${property.url.startsWith("/") ? "" : "/"}${property.url}`;
+            const detail = await this.scrapeDetail(
+              url, false, false, verificationTimeouts.requestMs, batchController.signal,
+            );
+            const enriched = extractPropertyEvidence(property, prepareDetailEvidenceContent(
+              detail.markdown, detail.rawHtml, criteria, property.title,
+            ));
+            const verified = enriched.bathrooms > 0;
+            candidates[index] = addDiagnostic(enriched, "listing-search", verified ? "success" : "warning", verified
+              ? `Bathroom total verified from the exact Realtor property page: ${enriched.bathrooms} baths${enriched.fullBathrooms != null ? ` (${enriched.fullBathrooms} full, ${enriched.halfBathrooms || 0} half)` : ""}.`
+              : "The exact Realtor property page did not provide a usable bathroom total.");
+          } catch (error) {
+            candidates[index] = addDiagnostic(candidates[index], "listing-search", "warning",
+              `Exact Realtor bathroom verification stopped: ${error instanceof Error ? error.message : String(error)}`);
+          }
+        });
+      } finally {
+        clearTimeout(batchTimer);
+      }
     }
     if (!this.hasComplexCriteria(criteria)) {
       return rankAssessedProperties(candidates, criteria);
@@ -478,11 +488,20 @@ export class FirecrawlSkill {
     return rankAssessedProperties(candidates, criteria);
   }
 
-  private async scrapeDetail(url: string, schoolLight = false, freshEvidence = false): Promise<{ rawHtml: string; markdown: string; scrapeId?: string }> {
+  private async scrapeDetail(
+    url: string,
+    schoolLight = false,
+    freshEvidence = false,
+    timeoutOverrideMs?: number,
+    externalSignal?: AbortSignal,
+  ): Promise<{ rawHtml: string; markdown: string; scrapeId?: string }> {
     firecrawlRequestBudget.consume("listing detail page");
     // The synchronous v1 endpoint consistently returns Realtor's full raw
     // document. The v2 endpoint intermittently remains pending until our
     // 75/105-second abort, which made evidence disappear after a restart.
+    const abortMs = timeoutOverrideMs ?? (schoolLight ? 105000 : 75000);
+    const timeoutSignal = AbortSignal.timeout(abortMs);
+    const signal = externalSignal ? AbortSignal.any([externalSignal, timeoutSignal]) : timeoutSignal;
     const response = await this.listingFetch("https://api.firecrawl.dev/v1/scrape", {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${this.apiKey}` },
@@ -496,10 +515,10 @@ export class FirecrawlSkill {
         // one-hour cache avoids repeatedly launching an expensive browser job.
         // Exact-address fallbacks still cover an incomplete cached document.
         waitFor: schoolLight ? 3000 : freshEvidence ? 3000 : 0,
-        timeout: schoolLight ? 90000 : 60000,
+        timeout: Math.max(1000, Math.min(schoolLight ? 90000 : 60000, abortMs - 1000)),
         maxAge: schoolLight || freshEvidence ? 3600000 : 604800000,
       }),
-      signal: AbortSignal.timeout(schoolLight ? 105000 : 75000),
+      signal,
     });
     if (!response.ok) {
       const errorBody = (await response.text()).replace(/\s+/g, " ").slice(0, 500);
@@ -1242,6 +1261,15 @@ export function bathroomVerificationPriority(property: Property): number {
   if (property.sqft >= 3000 && property.bathrooms <= 2.5) score += 80;
   if (property.bathrooms > 0 && property.bathrooms < 2) score += 20;
   return score;
+}
+
+export function resolveBathroomVerificationTimeouts(
+  requestValue = process.env.RE_BATHROOM_VERIFY_REQUEST_TIMEOUT_MS,
+  batchValue = process.env.RE_BATHROOM_VERIFY_BATCH_TIMEOUT_MS,
+): { requestMs: number; batchMs: number } {
+  const requestMs = Math.max(5000, Math.min(Number(requestValue) || 12000, 20000));
+  const batchMs = Math.max(requestMs, Math.min(Number(batchValue) || 20000, 30000));
+  return { requestMs, batchMs };
 }
 
 export function extractInteractText(payload: unknown): string {

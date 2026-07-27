@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { extractCoreListingMetrics, extractPropertyEvidence } from "../core/property-matcher";
 import { defaultSearchCriteria, Property, UserSession } from "../core/types";
-import { bathroomVerificationPriority, canonicalMarketLocation, detailNeedsInteractiveExpansion, extractInteractText, extractVisibleSearchCardMetrics, FirecrawlSkill, isSchoolOnlyDetailRequest, prepareDetailEvidenceContent, prepareSearchPagePropertyEvidence, prioritizeCandidatesForCriteria, requiresListingDetail, resolveFeatureEnrichmentLimit, resolveFirecrawlBudget, selectCachedLiveProperties, shouldUseCachedMarket, shouldVerifyBathroomsSeparately } from "./firecrawl-skill";
+import { bathroomVerificationPriority, canonicalMarketLocation, detailNeedsInteractiveExpansion, extractInteractText, extractVisibleSearchCardMetrics, FirecrawlSkill, isSchoolOnlyDetailRequest, prepareDetailEvidenceContent, prepareSearchPagePropertyEvidence, prioritizeCandidatesForCriteria, requiresListingDetail, resolveBathroomVerificationTimeouts, resolveFeatureEnrichmentLimit, resolveFirecrawlBudget, selectCachedLiveProperties, shouldUseCachedMarket, shouldVerifyBathroomsSeparately } from "./firecrawl-skill";
 
 test("caps the assessed result set at 20 properties", async () => {
   const properties: Property[] = Array.from({ length: 30 }, (_, index) => ({
@@ -143,6 +143,18 @@ test("suspicious large-home bathroom summaries are prioritized for exact detail 
     bathroomsSource: "listing-card", sqft: 2984,
   }) > 0);
   assert.equal(bathroomVerificationPriority({ ...base, fullBathrooms: 4, halfBathrooms: 1 }), 0);
+});
+
+test("bathroom verification has bounded request and batch deadlines", () => {
+  assert.deepEqual(resolveBathroomVerificationTimeouts(undefined, undefined), {
+    requestMs: 12000, batchMs: 20000,
+  });
+  assert.deepEqual(resolveBathroomVerificationTimeouts("999999", "1"), {
+    requestMs: 20000, batchMs: 20000,
+  });
+  assert.deepEqual(resolveBathroomVerificationTimeouts("1", "999999"), {
+    requestMs: 5000, batchMs: 30000,
+  });
 });
 
 test("Interact object and JSON-string results preserve the Neighborhood and schools text", () => {
