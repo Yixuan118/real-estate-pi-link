@@ -83,7 +83,7 @@ class PiRuntimeService {
     const compactProps = Array.isArray(input.properties)
       ? input.properties.slice(0, 20).map((p: any) => ({
           id: p.id, title: p.title, price: p.price,
-          bedrooms: p.bedrooms, bathrooms: p.bathrooms,
+          bedrooms: p.bedrooms, bedroomsSource: p.bedroomsSource, bathrooms: p.bathrooms,
           fullBathrooms: p.fullBathrooms, halfBathrooms: p.halfBathrooms,
           sqft: p.sqft, sqftSource: p.sqftSource,
           location: p.location, features: p.features,

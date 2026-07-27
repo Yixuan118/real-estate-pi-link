@@ -222,7 +222,7 @@ function renderProperties(properties) {
         <div class="property-location">📍 ${escapeHtml(p.location)}</div>
         <div class="property-price">$${p.price.toLocaleString()}</div>
         <div class="property-details">
-          <span>${Number(p.bedrooms) > 0 ? `${p.bedrooms} beds` : "Beds unavailable"}</span>
+          <span>${Number(p.bedrooms) > 0 ? `${p.bedrooms} beds` : p.bedroomsSource ? "Studio" : "Beds unavailable"}</span>
           <span>${formatBathrooms(p)}</span>
           <span>📐 ${p.sqft?.toLocaleString() || "N/A"} sqft</span>
         </div>

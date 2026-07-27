@@ -114,6 +114,7 @@ export function extractPropertyEvidence(property: Property, content: string): Pr
   return {
     ...property,
     bedrooms: coreMetrics.bedrooms ?? property.bedrooms,
+    bedroomsSource: coreMetrics.bedrooms != null ? "detail-page" : property.bedroomsSource,
     bathrooms: coreMetrics.bathrooms ?? property.bathrooms,
     bathroomsSource: hasCurrentBathroomTotal ? "detail-page" : property.bathroomsSource,
     // A newly extracted total without a matching breakdown must clear a stale
@@ -303,6 +304,18 @@ export function extractCoreListingMetrics(
       ? undefined
       : explicitTotal;
 
+    const studioSummary = window.match(/\bstudio\b[\s\S]{0,500}?(\d+(?:\.\d+)?)\s*(?:baths?|ba)\b[\s\S]{0,500}?([\d,]{3,})\s*(?:sqft|square\s+feet)\b/i);
+    if (studioSummary) {
+      const bathrooms = validMetric(studioSummary[1], 0, 20);
+      const sqft = explicitSqft ?? validMetric(studioSummary[2].replace(/,/g, ""), 100, 100000);
+      return {
+        bedrooms: 0,
+        bathrooms,
+        sqft,
+        ...(sqft != null ? { sqftSource: explicitSqft != null ? "detail-page" as const : "listing-card" as const } : {}),
+      };
+    }
+
     const labelFirst = window.match(/\bbeds?\s*(\d+(?:\.\d+)?)\s+baths?\s*(\d+(?:\.\d+)?)\s+(?:sqft\s*)?(?:square\s+feet\s*)?([\d,]{3,})?/i);
     const valueFirst = window.match(/\b(\d+(?:\.\d+)?)\s*beds?\s+(\d+(?:\.\d+)?)\s*baths?\s+([\d,]{3,})\s*(?:sqft|square\s+feet)\b/i);
     const proseSummary = window.match(/\b(\d+)\s+bedrooms?\b[^.;]{0,100}\b(\d+(?:\.\d+)?)\s+bathrooms?\b/i);
@@ -378,7 +391,7 @@ export function assessProperty(property: Property, criteria: SearchCriteria): Pr
   }
 
   if (criteria.minBedrooms != null) {
-    checks.push(property.bedrooms <= 0
+    checks.push(property.bedrooms <= 0 && !property.bedroomsSource
       ? unknown(`bedrooms at least ${criteria.minBedrooms}`, "The bedroom count was not available from the listing source.")
       : property.bedrooms >= criteria.minBedrooms
       ? verified(`bedrooms at least ${criteria.minBedrooms}`, `Listing has ${property.bedrooms} bedroom(s).`)

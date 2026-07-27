@@ -43,6 +43,7 @@ export interface Property {
   title: string;
   price: number;
   bedrooms: number;
+  bedroomsSource?: "structured-data" | "listing-card" | "detail-page" | "cached";
   bathrooms: number;
   fullBathrooms?: number;
   halfBathrooms?: number;

@@ -151,6 +151,20 @@ test("verifies basic location and bedroom criteria instead of marking every resu
   assert.equal(match.checks.length, 2);
 });
 
+test("a source-backed Studio fails a three-bedroom requirement instead of becoming unknown", () => {
+  const property: Property = {
+    id: "studio", title: "189 Chestnut Hill Ave Apt 14, Boston, MA 02135",
+    price: 295900, bedrooms: 0, bedroomsSource: "listing-card",
+    bathrooms: 1, sqft: 395, location: "Boston, MA 02135", features: [],
+    url: "", listedAt: new Date().toISOString(), source: "Realtor.com",
+  };
+  const match = assessProperty(property, {
+    ...defaultSearchCriteria(), location: "Boston, MA", minBedrooms: 3, maxPrice: 1000000,
+  });
+  assert.equal(match.overall, "failed");
+  assert.equal(match.checks.find((check) => /bedrooms/.test(check.criterion))?.status, "failed");
+});
+
 test("fails basic search results from the wrong market or below the bedroom minimum", () => {
   const property: Property = {
     id: "basic-2", title: "Atlanta home", price: 400000, bedrooms: 2, bathrooms: 2, sqft: 1400,

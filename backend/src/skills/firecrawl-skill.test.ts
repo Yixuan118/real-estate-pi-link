@@ -298,6 +298,41 @@ test("visible Realtor cards keep each address bound to one complete metric group
   );
 });
 
+test("a Studio card cannot inherit bedrooms, bathrooms, or sqft from the previous listing", () => {
+  const content = [
+    "$975,000 3bed 3.5bath 2,974sqft 20 Previous St Boston, MA 02108 Email agent",
+    "$295,900 Studio 1bath 395sqft 189 Chestnut Hill Ave Apt 14 Boston, MA 02135 Email agent",
+    "$425,000 2bed 1bath 900sqft 200 Next St Boston, MA 02135",
+  ].join(" ");
+  assert.deepEqual(
+    extractVisibleSearchCardMetrics(content, "189 Chestnut Hill Ave Apt 14, Boston, MA 02135"),
+    { bedrooms: 0, bathrooms: 1, sqft: 395, sqftSource: "listing-card" },
+  );
+
+  const listing = {
+    "@type": "RealEstateListing",
+    offers: { price: "295900" },
+    url: "https://www.realtor.com/realestateandhomes-detail/189-Chestnut-Hill-Ave-Apt-14_Boston_MA_02135_M49276-17689",
+    mainEntity: {
+      floorSize: { value: "395" },
+      address: {
+        streetAddress: "189 Chestnut Hill Ave Apt 14",
+        addressLocality: "Boston", addressRegion: "MA", postalCode: "02135",
+      },
+    },
+  };
+  const raw = `<script data-testid="seoLinkingData">${JSON.stringify([{
+    "@type": "CollectionPage", mainEntity: { itemListElement: [listing] },
+  }])}</script>`;
+  const parsed = (new FirecrawlSkill() as any).parsePropertiesFromHtml(
+    raw, { ...defaultSearchCriteria(), location: "Boston, MA", minBedrooms: 3 }, content,
+  );
+  assert.equal(parsed[0].bedrooms, 0);
+  assert.equal(parsed[0].bedroomsSource, "listing-card");
+  assert.equal(parsed[0].bathrooms, 1);
+  assert.equal(parsed[0].sqft, 395);
+});
+
 test("bounded pagination supplements a heavily filtered first page without merging distinct units", async () => {
   const requestedPages: string[] = [];
   const listings = Array.from({ length: 11 }, (_, index) => ({

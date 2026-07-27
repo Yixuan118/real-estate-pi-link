@@ -52,7 +52,9 @@ export class FirecrawlSkill {
         if (criteria.maxPrice != null && p.price > criteria.maxPrice) return false;
         // Zero is the legacy sentinel for "not extracted", not evidence that a
         // listing has zero rooms. Keep unknowns until detail enrichment/assessment.
-        if (criteria.minBedrooms != null && p.bedrooms > 0 && p.bedrooms < criteria.minBedrooms) return false;
+        if (criteria.minBedrooms != null
+            && (p.bedroomsSource || p.bedrooms > 0)
+            && p.bedrooms < criteria.minBedrooms) return false;
         if (criteria.minBathrooms != null && p.bathrooms > 0 && p.bathrooms < criteria.minBathrooms) return false;
         // Do not reject feature requirements from search cards. Many Realtor
         // facts only appear on the detail page and are evaluated after enrichment.
@@ -74,8 +76,9 @@ export class FirecrawlSkill {
       }
 
       // Version the cache whenever core metric normalization changes.
-      // v8 invalidates records created before nearest complete-card matching.
-      const cacheKey = `v8:${targetUrl.toLowerCase()}`;
+      // v9 invalidates records created before Studio cards were treated as an
+      // explicit zero-bedroom value and kept inside their own card boundary.
+      const cacheKey = `v9:${targetUrl.toLowerCase()}`;
       const cachedMarket = this.listingCache.get(cacheKey);
       // A basic market cache normally contains only the first result page.
       // Feature searches intentionally inspect additional pages so likely
@@ -725,7 +728,12 @@ export class FirecrawlSkill {
         const offers = listing.offers || {};
         const priceVal = parseInt(offers.price) || 0;
         if (priceVal < 50000 || priceVal > 50000000) continue;
-        const bedroomVal = parseInt(me.numberOfBedrooms) || 0;
+        const bedroomNumber = Number(me.numberOfBedrooms);
+        const hasStructuredBedrooms = me.numberOfBedrooms != null
+          && String(me.numberOfBedrooms).trim() !== ""
+          && Number.isInteger(bedroomNumber)
+          && bedroomNumber >= 0 && bedroomNumber < 20;
+        const bedroomVal = hasStructuredBedrooms ? bedroomNumber : 0;
         const sqftVal = extractStructuredSqft(me);
         const street = cleanSchemaText(address.streetAddress);
         const city = cleanSchemaText(address.addressLocality);
@@ -746,7 +754,9 @@ export class FirecrawlSkill {
         props.push({
           id: "r" + (i + 1),
           title: canonicalTitle || cleanSchemaText(listing.name) || (city ? "Home in " + city : bedroomVal + "BR Home"),
-          price: priceVal, bedrooms: bedroomVal, bathrooms, fullBathrooms, halfBathrooms,
+          price: priceVal, bedrooms: bedroomVal,
+          bedroomsSource: hasStructuredBedrooms ? "structured-data" : undefined,
+          bathrooms, fullBathrooms, halfBathrooms,
           bathroomsSource: bathrooms > 0 ? "structured-data" : undefined, sqft: sqftVal,
           sqftSource: sqftVal > 0 ? "structured-data" : undefined,
           location: city ? city + ", " + state + (zip ? " " + zip : "") : state, features: [],
@@ -787,7 +797,10 @@ export class FirecrawlSkill {
       // card order) remain inside the property-scoped extractor window.
       const metrics = extractVisibleSearchCardMetrics(normalized, prop.title)
         || extractCoreListingMetrics(`${prop.title}\n${propertyEvidence}`, prop.title);
-      if (metrics.bedrooms != null) prop.bedrooms = metrics.bedrooms;
+      if (metrics.bedrooms != null) {
+        prop.bedrooms = metrics.bedrooms;
+        prop.bedroomsSource = "listing-card";
+      }
       if (metrics.bathrooms != null) {
         prop.bathrooms = metrics.bathrooms;
         prop.fullBathrooms = metrics.fullBathrooms;
@@ -893,7 +906,10 @@ export class FirecrawlSkill {
       id++;
       props.push({
         id: "fc" + id,
-        title: title.substring(0, 80), price, bedrooms, bathrooms, sqft,
+        title: title.substring(0, 80), price, bedrooms,
+        bedroomsSource: isStudio || coreMetrics.bedrooms != null || Boolean(bedMatch)
+          ? "listing-card" : undefined,
+        bathrooms, sqft,
         location: criteria.location || "",
         features: [], url: "", imageUrl: "",
         listedAt: new Date().toISOString(),
@@ -904,7 +920,9 @@ export class FirecrawlSkill {
 
     if (props.length > 0) {
       const filteredProps = props.filter((p: any) => {
-        if (criteria.minBedrooms && p.bedrooms > 0 && p.bedrooms < criteria.minBedrooms) return false;
+        if (criteria.minBedrooms
+            && (p.bedroomsSource || p.bedrooms > 0)
+            && p.bedrooms < criteria.minBedrooms) return false;
         if (criteria.minBathrooms && p.bathrooms > 0 && p.bathrooms < criteria.minBathrooms) return false;
         if (criteria.maxPrice && p.price > criteria.maxPrice) return false;
         if (criteria.minPrice && p.price < criteria.minPrice) return false;
@@ -1062,7 +1080,7 @@ export function extractVisibleSearchCardMetrics(
   const lower = normalized.toLowerCase();
   const address = propertyTitle.split(",")[0].trim().toLowerCase();
   if (!address) return undefined;
-  const metricPattern = /(\d+(?:\.\d+)?)\s*(?:beds?|bd)\b[\s\S]{0,500}?(\d+(?:\.\d+)?)\s*(?:baths?|ba)\b[\s\S]{0,500}?([\d,]{3,})\s*(?:sqft|square\s+feet)\b/gi;
+  const metricPattern = /(?:(studio)\b|(\d+(?:\.\d+)?)\s*(?:beds?|bd)\b)[\s\S]{0,500}?(\d+(?:\.\d+)?)\s*(?:baths?|ba)\b[\s\S]{0,500}?([\d,]{3,})\s*(?:sqft|square\s+feet)\b/gi;
   let best: { distance: number; metrics: ReturnType<typeof extractCoreListingMetrics> } | undefined;
   let from = 0;
   for (let occurrence = 0; occurrence < 12; occurrence++) {
@@ -1078,9 +1096,9 @@ export function extractVisibleSearchCardMetrics(
         best = {
           distance,
           metrics: {
-            bedrooms: Number(preceding[1]),
-            bathrooms: Number(preceding[2]),
-            sqft: Number(preceding[3].replace(/,/g, "")),
+            bedrooms: preceding[1] ? 0 : Number(preceding[2]),
+            bathrooms: Number(preceding[3]),
+            sqft: Number(preceding[4].replace(/,/g, "")),
             sqftSource: "listing-card",
           },
         };
@@ -1094,9 +1112,9 @@ export function extractVisibleSearchCardMetrics(
         best = {
           distance,
           metrics: {
-            bedrooms: Number(following[1]),
-            bathrooms: Number(following[2]),
-            sqft: Number(following[3].replace(/,/g, "")),
+            bedrooms: following[1] ? 0 : Number(following[2]),
+            bathrooms: Number(following[3]),
+            sqft: Number(following[4].replace(/,/g, "")),
             sqftSource: "listing-card",
           },
         };
@@ -1393,6 +1411,7 @@ function repairCachedCoreMetrics(property: Property): Property {
     ...property,
     features,
     bedrooms: metrics.bedrooms ?? property.bedrooms,
+    bedroomsSource: metrics.bedrooms != null ? "cached" : property.bedroomsSource,
     bathrooms: metrics.bathrooms ?? property.bathrooms,
     bathroomsSource: hasCurrentBathroomTotal ? "cached" : property.bathroomsSource,
     fullBathrooms: hasCurrentBathroomTotal ? metrics.fullBathrooms : property.fullBathrooms,
@@ -1404,7 +1423,7 @@ function repairCachedCoreMetrics(property: Property): Property {
 
 function addCoreDataDiagnostic(property: Property): Property {
   const missing = [
-    property.bedrooms > 0 ? "" : "bedrooms",
+    property.bedroomsSource || property.bedrooms > 0 ? "" : "bedrooms",
     property.bathrooms > 0 ? "" : "bathrooms",
     property.sqft > 0 ? "" : "living area",
   ].filter(Boolean);
