@@ -3,7 +3,13 @@ import test from "node:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { extractGreatSchoolsRating, extractSchoolEvidence, extractTargetSchoolRating, SchoolRatingService } from "./school-rating-service";
+import {
+  extractDedicatedSchoolPageRating,
+  extractGreatSchoolsRating,
+  extractSchoolEvidence,
+  extractTargetSchoolRating,
+  SchoolRatingService,
+} from "./school-rating-service";
 import { assessProperty } from "../core/property-matcher";
 import { defaultSearchCriteria } from "../core/types";
 
@@ -181,10 +187,13 @@ test("uses the exact Realtor URL to recover lazy-loaded school stages", async ()
     const body = JSON.parse(String(init?.body || "{}"));
     requestedBodies.push(body);
     if (String(input).endsWith("/v2/search") && String(body.query).startsWith("site:")) {
+      const description = String(body.query).includes("\"High School\"")
+        ? "Deering High School. Grades 9-12."
+        : "out of 10. Amanda C Rowe School. Grades K-5; out of 10. Lincoln Middle School. Grades 6-8; Grades 9-12.";
       return new Response(JSON.stringify({ data: { web: [{
         title: "40 Webb St, Portland, ME 04102",
         url: listingUrl,
-        description: "out of 10. Amanda C Rowe School. Grades K-5; out of 10. Lincoln Middle School. Grades 6-8; out of 10. Deering High School. Grades 9-12.",
+        description,
       }] } }), { status: 200, headers: { "Content-Type": "application/json" } });
     }
     if (String(input).endsWith("/v2/search")) {
@@ -218,6 +227,7 @@ test("uses the exact Realtor URL to recover lazy-loaded school stages", async ()
 
   assert.match(requestedBodies[0]?.query || "", /^site:www\.realtor\.com\/realestateandhomes-detail\/40-Webb-St_/);
   assert.doesNotMatch(requestedBodies[0]?.query || "", /\?from=srp/);
+  assert.ok(requestedBodies.some((body) => String(body.query).includes("\"High School\"")));
   assert.deepEqual(enriched.schools?.map((school) => [school.name, school.rating, school.type]), [
     ["Amanda C Rowe School", 4, "elementary"],
     ["Lincoln Middle School", 6, "middle"],
@@ -449,6 +459,50 @@ test("parses the rating formats used by Realtor and GreatSchools pages", () => {
   assert.equal(extractGreatSchoolsRating("Clarke Middle School 5/10 GreatSchools Rating"), 5);
   assert.equal(extractGreatSchoolsRating("GreatSchools Rating: 8/10"), 8);
   assert.equal(extractGreatSchoolsRating("Parent review: 10 out of 10"), undefined);
+});
+
+test("extracts a rating from Realtor dedicated-school HTML with split text nodes", () => {
+  const html = `
+    <title>Amanda C Rowe School in Portland, ME</title>
+    <span>4<!-- --> out of 10</span>
+    <div>GreatSchools Rating</div>
+    <div aria-label="5 out of 5 stars">Parent Rating</div>`;
+  assert.equal(extractDedicatedSchoolPageRating(html, "Amanda C Rowe School"), 4);
+});
+
+test("uses a direct dedicated-school page without consuming another Firecrawl request", async () => {
+  let firecrawlCalls = 0;
+  let directCalls = 0;
+  const firecrawlFetch = (async () => {
+    firecrawlCalls += 1;
+    return new Response("unexpected", { status: 500 });
+  }) as typeof fetch;
+  const directFetch = (async () => {
+    directCalls += 1;
+    return new Response(`
+      <title>Amanda C Rowe School in Portland, ME</title>
+      <span>4<!-- --> out of 10</span><div>GreatSchools Rating</div>
+    `, { status: 200 });
+  }) as typeof fetch;
+  const service = new SchoolRatingService("test-key", firecrawlFetch, "", directFetch);
+  const property = {
+    id: "portland", title: "88 Mayer Rd, Portland, ME 04102", price: 1, bedrooms: 3, bathrooms: 1.5, sqft: 1744,
+    location: "Portland, ME 04102", features: [], url: "https://www.realtor.com/example",
+    listedAt: new Date().toISOString(), source: "test",
+    schools: [{
+      name: "Amanda C Rowe School", type: "elementary" as const, scale: 10 as const,
+      ratingSource: "unknown" as const, evidenceSource: "realtor-listing" as const,
+      sourceUrl: "https://www.realtor.com/local/schools/Amanda-C-Rowe-School-0732860521",
+      relationship: "assigned" as const,
+      checkedAt: new Date().toISOString(),
+    }],
+  };
+
+  const enriched = await service.enrichProperty(property, "Portland, ME");
+
+  assert.equal(enriched.schools?.[0]?.rating, 4);
+  assert.equal(directCalls, 1);
+  assert.equal(firecrawlCalls, 0);
 });
 
 test("strict mode rejects school evidence from a non-exact Realtor property result", async () => {

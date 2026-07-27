@@ -147,6 +147,7 @@ export class SchoolRatingService {
     private readonly apiKey = readEnvironmentSecret("FIRECRAWL_API_KEY"),
     private readonly fetchImpl: FetchLike = fetch,
     cacheFile = fetchImpl === fetch ? defaultCacheFile("school-ratings.json") : "",
+    private readonly directPageFetch: FetchLike | undefined = fetchImpl === fetch ? fetch : undefined,
   ) { this.persistentCache = new PersistentJsonCache<SchoolEvidence[]>(cacheFile); }
 
   get enabled(): boolean { return Boolean(this.apiKey); }
@@ -189,16 +190,16 @@ export class SchoolRatingService {
   }
 
   async lookupSchool(name: string, location?: string): Promise<SchoolEvidence[]> {
-    return this.cached(`school:v5:${normalizeCacheKey(name)}:${normalizeCacheKey(location || "")}`, async () => {
+    return this.cached(`school:v7:${normalizeCacheKey(name)}:${normalizeCacheKey(location || "")}`, async () => {
       return this.searchExactSchool(name, location || "United States");
     });
   }
 
   private async lookupAssociatedSchool(school: SchoolEvidence, location: string): Promise<SchoolEvidence[]> {
     if (!isRealtorSchoolUrl(school.sourceUrl)) return this.lookupSchool(school.name, location);
-    return this.cached(`realtor-school:v2:${normalizeCacheKey(school.sourceUrl)}`, async () => {
+    return this.cached(`realtor-school:v3:${normalizeCacheKey(school.sourceUrl)}`, async () => {
       const content = await this.scrapeDedicatedSchoolPage(school.sourceUrl);
-      const rating = extractTargetSchoolRating(content, school.name);
+      const rating = extractDedicatedSchoolPageRating(content, school.name);
       if (rating == null) return [];
       return [{
         ...school,
@@ -212,7 +213,7 @@ export class SchoolRatingService {
   }
 
   private async searchByProperty(address: string, location: string, propertyUrl?: string): Promise<SchoolEvidence[]> {
-    return this.cached(`property:v6:${normalizeCacheKey(address)}:${normalizeCacheKey(location)}:${normalizeCacheKey(propertyUrl || "")}`, () =>
+    return this.cached(`property:v10:${normalizeCacheKey(address)}:${normalizeCacheKey(location)}:${normalizeCacheKey(propertyUrl || "")}`, () =>
       this.searchExactPropertyListing(address, location, propertyUrl));
   }
 
@@ -237,29 +238,50 @@ export class SchoolRatingService {
   }
 
   private async searchExactPropertyListing(address: string, location: string, propertyUrl?: string): Promise<SchoolEvidence[]> {
-    firecrawlRequestBudget.consume("property-address school search");
-    const response = await this.fetchImpl("https://api.firecrawl.dev/v2/search", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${this.apiKey}` },
-      body: JSON.stringify({
-        query: propertyUrl
-          ? `site:${canonicalSearchUrl(propertyUrl)} "Grades 9-12" "out of 10"`
-          : `"${address}" "${location}" schools "GreatSchools Rating"`,
-        limit: 3, sources: ["web"], includeDomains: ["realtor.com"], country: "US", timeout: 30000,
-      }),
-      signal: AbortSignal.timeout(40000),
-    });
-    if (!response.ok) throw new Error(`Firecrawl school search HTTP ${response.status}`);
-    const payload: any = await response.json();
-    firecrawlRequestBudget.settle("property-address school search", payload.creditsUsed);
-    const web = Array.isArray(payload.data?.web) ? payload.data.web : Array.isArray(payload.data) ? payload.data : [];
     const schools: SchoolEvidence[] = [];
-    for (const item of web) {
-      const url = String(item.url || "");
-      if (!/^https?:\/\/(?:www\.)?realtor\.com\//i.test(url)) continue;
-      if (!isExactPropertyResult(item, address)) continue;
-      const content = [item.title, item.description, item.markdown].filter(Boolean).join("\n");
-      schools.push(...extractSchoolEvidence(content, url, "realtor-listing"));
+    const runSearch = async (query: string, label: string): Promise<void> => {
+      firecrawlRequestBudget.consume(label);
+      const response = await this.fetchFirecrawlWithRateLimitRetry("https://api.firecrawl.dev/v2/search", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${this.apiKey}` },
+        body: JSON.stringify({
+          query, limit: 3, sources: ["web"], includeDomains: ["realtor.com"], country: "US", timeout: 30000,
+        }),
+      });
+      if (!response.ok) throw new Error(`Firecrawl school search HTTP ${response.status}`);
+      const payload: any = await response.json();
+      firecrawlRequestBudget.settle(label, payload.creditsUsed);
+      const web = Array.isArray(payload.data?.web) ? payload.data.web : Array.isArray(payload.data) ? payload.data : [];
+      for (const item of web) {
+        const url = String(item.url || "");
+        if (!/^https?:\/\/(?:www\.)?realtor\.com\//i.test(url)) continue;
+        if (!isExactPropertyResult(item, address)) continue;
+        const content = [item.title, item.description, item.markdown].filter(Boolean).join("\n");
+        schools.push(...extractSchoolEvidence(content, url, "realtor-listing"));
+      }
+    };
+
+    const canonicalUrl = propertyUrl ? canonicalSearchUrl(propertyUrl) : "";
+    await runSearch(
+      propertyUrl
+        ? `site:${canonicalUrl} "Grades 9-12" "out of 10"`
+        : `"${address}" "${location}" schools "GreatSchools Rating"`,
+      "property-address school search",
+    );
+    if (propertyUrl) {
+      // Search snippets are often truncated immediately before the high-school
+      // name (for example they contain only “Grades 9-12”). Ask the index for
+      // each missing stage explicitly; this changes the snippet window and
+      // recovers the omitted school identity without browser interaction.
+      const stageQueries: Array<[SchoolEvidence["type"], string]> = [
+        ["elementary", "\"Elementary School\""],
+        ["middle", "\"Middle School\""],
+        ["high", "\"High School\""],
+      ];
+      for (const [type, term] of stageQueries) {
+        if (schools.some((school) => school.type === type || school.type === "k12")) continue;
+        await runSearch(`site:${canonicalUrl} ${term}`, `property ${type} school search`);
+      }
     }
     return mergeSchools([], schools);
   }
@@ -269,7 +291,7 @@ export class SchoolRatingService {
     if (profile.knownUnrated) return [];
     if (profile.directUrl) {
       const content = await this.scrapeDedicatedSchoolPage(profile.directUrl);
-      const rating = extractTargetSchoolRating(content, profile.lookupName);
+      const rating = extractDedicatedSchoolPageRating(content, profile.lookupName);
       return rating == null ? [] : [{
         name, rating, scale: 10, type: inferSchoolType(name, content), ratingSource: "GreatSchools",
         evidenceSource: "greatschools-page", sourceUrl: profile.directUrl,
@@ -277,14 +299,13 @@ export class SchoolRatingService {
       }];
     }
     firecrawlRequestBudget.consume(`exact school search: ${name}`);
-    const response = await this.fetchImpl("https://api.firecrawl.dev/v2/search", {
+    const response = await this.fetchFirecrawlWithRateLimitRetry("https://api.firecrawl.dev/v2/search", {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${this.apiKey}` },
       body: JSON.stringify({
         query: `"${profile.lookupName}" "${profile.location}" GreatSchools rating`, limit: 1, sources: ["web"],
         includeDomains: ["realtor.com", "greatschools.org"], country: "US", timeout: 30000,
       }),
-      signal: AbortSignal.timeout(40000),
     });
     if (!response.ok) throw new Error(`Firecrawl exact school search HTTP ${response.status}`);
     const payload: any = await response.json();
@@ -308,14 +329,15 @@ export class SchoolRatingService {
       const searchContent = item.markdown
         ? `${item.title || ""}\n${item.markdown}`
         : [item.title, item.description].filter(Boolean).join("\n");
-      const searchRating = extractTargetSchoolRating(searchContent, profile.lookupName);
-      const scrapedContent = searchRating == null
-        ? await this.scrapeDedicatedSchoolPage(url).catch(() => "") : "";
+      // A search snippet can place another nearby school's score beside the
+      // requested name. The dedicated profile is cheap to fetch directly and
+      // is the only safe source for the final numeric rating.
+      const scrapedContent = await this.scrapeDedicatedSchoolPage(url).catch(() => "");
       const content = scrapedContent || searchContent;
       const normalizedContent = normalizeKey(`${searchContent}\n${content}`);
       if (!expectedTokens.every((token) => normalizedContent.includes(token))) continue;
       if (locationTokens.length && !locationTokens.some((token) => normalizedContent.includes(token))) continue;
-      const rating = extractTargetSchoolRating(content, profile.lookupName);
+      const rating = extractDedicatedSchoolPageRating(content, profile.lookupName);
       if (rating == null) continue;
       results.push({
         name, rating, scale: 10, type: inferSchoolType(name, content), ratingSource: "GreatSchools",
@@ -328,8 +350,36 @@ export class SchoolRatingService {
   }
 
   private async scrapeDedicatedSchoolPage(url: string): Promise<string> {
+    // Dedicated Realtor and GreatSchools profile pages are ordinary public
+    // documents. Fetching them directly avoids spending one Firecrawl request
+    // per school and, more importantly, avoids exhausting Firecrawl's
+    // requests-per-minute limit after a batch of listing-detail scrapes.
+    if (this.directPageFetch && isDedicatedSchoolHost(url)) {
+      try {
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+          const direct = await this.directPageFetch(url, {
+            headers: {
+              "User-Agent": "Mozilla/5.0 (compatible; RealEstatePi/1.0; school-evidence)",
+              "Accept-Language": "en-US,en;q=0.9",
+            },
+            signal: AbortSignal.timeout(20000),
+          });
+          if (direct.ok) {
+            const content = await direct.text();
+            if (content && extractDedicatedSchoolPageRating(content, "") != null) return content;
+            break;
+          }
+          if (direct.status !== 429 || attempt === 1) break;
+          const retryText = direct.headers.get("retry-after");
+          const retrySeconds = retryText && Number.isFinite(Number(retryText)) ? Number(retryText) : 2;
+          await new Promise((resolve) => setTimeout(resolve, Math.min(10000, Math.max(500, retrySeconds * 1000))));
+        }
+      } catch {
+        // Fall through to Firecrawl when the host blocks a direct server fetch.
+      }
+    }
     firecrawlRequestBudget.consume("dedicated school page fallback");
-    const response = await this.fetchImpl("https://api.firecrawl.dev/v2/scrape", {
+    const response = await this.fetchFirecrawlWithRateLimitRetry("https://api.firecrawl.dev/v2/scrape", {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${this.apiKey}` },
       body: JSON.stringify({
@@ -337,12 +387,40 @@ export class SchoolRatingService {
         // snapshots can change whether a hard school threshold passes.
         url, formats: ["markdown"], onlyMainContent: true, maxAge: 0, timeout: 30000,
       }),
-      signal: AbortSignal.timeout(40000),
     });
     if (!response.ok) throw new Error(`Firecrawl school page HTTP ${response.status}`);
     const payload: any = await response.json();
     firecrawlRequestBudget.settle("dedicated school page fallback", payload.creditsUsed);
     return String(payload.data?.markdown || payload.data?.content || "");
+  }
+
+  private async fetchFirecrawlWithRateLimitRetry(url: string, init: RequestInit): Promise<Response> {
+    let response: Response | undefined;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      response = await this.fetchImpl(url, { ...init, signal: AbortSignal.timeout(45000) });
+      if (response.status !== 429 || attempt === 2) return response;
+      const body = await response.clone().text().catch(() => "");
+      const retryHeaderText = response.headers.get("retry-after");
+      const retryBodyText = body.match(/retry\s+after\s+(\d+)s/i)?.[1];
+      const retryHeader = retryHeaderText == null || retryHeaderText.trim() === "" ? NaN : Number(retryHeaderText);
+      const retryBody = retryBodyText == null || retryBodyText.trim() === "" ? NaN : Number(retryBodyText);
+      const seconds = Number.isFinite(retryHeader) && retryHeader >= 0
+        ? retryHeader
+        : Number.isFinite(retryBody) && retryBody >= 0 ? retryBody : 15 * (attempt + 1);
+      await new Promise((resolve) => setTimeout(resolve, seconds === 0
+        ? 0 : Math.min(65000, Math.max(1000, seconds * 1000 + 500))));
+    }
+    return response!;
+  }
+}
+
+function isDedicatedSchoolHost(sourceUrl: string): boolean {
+  try {
+    const host = new URL(sourceUrl).hostname.toLowerCase();
+    return host === "www.realtor.com" || host === "realtor.com"
+      || host === "www.greatschools.org" || host === "greatschools.org";
+  } catch {
+    return false;
   }
 }
 
@@ -451,6 +529,23 @@ export function extractTargetSchoolRating(content: string, schoolName: string): 
   return undefined;
 }
 
+export function extractDedicatedSchoolPageRating(content: string, schoolName: string): number | undefined {
+  // On a dedicated profile page the identity is established by its exact URL.
+  // Realtor inserts an HTML comment between the score and “out of 10”, while
+  // GreatSchools commonly renders “2/10”. Keep the match close to the
+  // GreatSchools label so parent-review star ratings cannot be mistaken for it.
+  const readable = content
+    .replace(/<!--[\s\S]*?-->/g, "")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&(?:nbsp|#160);/gi, " ")
+    .replace(/\s+/g, " ");
+  const beforeLabel = readable.match(/\b(\d{1,2})\s*(?:\/\s*10|out\s+of\s+10)\s+GreatSchools(?:\s+Summary)?\s+Rating\b/i);
+  const afterLabel = readable.match(/\bGreatSchools(?:\s+Summary)?\s+Rating\b.{0,120}?\b(\d{1,2})\s*(?:\/\s*10|out\s+of\s+10)\b/i);
+  const dedicated = validRating(beforeLabel?.[1] || afterLabel?.[1]);
+  if (dedicated != null) return dedicated;
+  return schoolName ? extractTargetSchoolRating(content, schoolName) : undefined;
+}
+
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -551,6 +646,7 @@ function extractRealtorGradeCards(
     .replace(/\[Button:\s*([^\]]+)\]/gi, "$1")
     .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)(?:\s+"[^"]*")?\)/g, "$1")
     .replace(/<[^>]+>/g, " ")
+    .replace(/[\r\n]+/g, ". ")
     .replace(/\s+/g, " ");
   const found = new Map<string, SchoolEvidence>();
   // The mandatory "out of 10" boundary prevents this fallback from starting
@@ -559,6 +655,29 @@ function extractRealtorGradeCards(
   let match: RegExpExecArray | null;
 
   while ((match = gradeCardPattern.exec(readable)) !== null) {
+    const name = cleanSchoolName(match[1]);
+    const grades = match[2].replace(/\s+/g, "");
+    if (!name || /\bschool district\b|\bpublic schools?\b/i.test(name)) continue;
+    addOrMerge(found, {
+      name,
+      scale: 10,
+      type: inferSchoolTypeFromGrades(grades, name),
+      grades,
+      ratingSource: "unknown",
+      evidenceSource,
+      sourceUrl: listingUrl,
+      relationship: evidenceSource === "realtor-listing" ? "listing-associated" : "nearby",
+      assignmentSource: evidenceSource === "realtor-listing" ? "realtor-listing" : undefined,
+      assignmentSourceUrl: evidenceSource === "realtor-listing" ? listingUrl : undefined,
+      checkedAt: new Date().toISOString(),
+    });
+  }
+  // A stage-focused search (for example `"High School"`) intentionally
+  // changes the search-engine snippet so it begins at the missing school name.
+  // Such a snippet may omit the preceding rating entirely, but the exact
+  // property URL plus adjacent Grades field still establishes the identity.
+  const identityOnlyPattern = /(?:^|[.;|]\s+)([A-Z0-9][A-Za-z0-9,'.&()\- ]{2,160}?(?:School|Academy|Institute))[.:\s]+Grades?\s+((?:PK|Pre-?K|K|\d{1,2})\s*[-–—]\s*(?:K|\d{1,2}))/gi;
+  while ((match = identityOnlyPattern.exec(readable)) !== null) {
     const name = cleanSchoolName(match[1]);
     const grades = match[2].replace(/\s+/g, "");
     if (!name || /\bschool district\b|\bpublic schools?\b/i.test(name)) continue;
@@ -596,9 +715,12 @@ function looksLikeSchool(name: string, context: string): boolean {
 
 function cleanSchoolName(value: string): string {
   return value.replace(/\s+/g, " ")
+    .replace(/^.*\b\d{5}(?:-\d{4})?\b\s*/i, "")
+    .replace(/^.*\bout\s+of\s+10[.:\s]*/i, "")
+    .replace(/^.*\b\d{1,2}\s+10\s+/i, "")
     .replace(/^(?:homes?|real estate|properties)\s+for\s+sale\s+near\s+/i, "")
     .replace(/\s*[-|:]\s*GreatSchools?$/i, "")
-    .replace(/^[-|:,\s]+|[-|:,\s]+$/g, "").trim();
+    .replace(/^[-|:.,\s]+|[-|:.,\s]+$/g, "").trim();
 }
 
 function validRating(value: unknown): number | undefined {

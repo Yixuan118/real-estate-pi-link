@@ -505,7 +505,7 @@ export class FirecrawlSkill {
     const abortMs = timeoutOverrideMs ?? (schoolLight ? 105000 : 75000);
     const timeoutSignal = AbortSignal.timeout(abortMs);
     const signal = externalSignal ? AbortSignal.any([externalSignal, timeoutSignal]) : timeoutSignal;
-    const response = await this.listingFetch("https://api.firecrawl.dev/v1/scrape", {
+    const request = {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${this.apiKey}` },
       body: JSON.stringify({
@@ -522,7 +522,12 @@ export class FirecrawlSkill {
         maxAge: schoolLight || freshEvidence ? 3600000 : 604800000,
       }),
       signal,
-    });
+    } satisfies RequestInit;
+    const response = await this.fetchFirecrawlWithRateLimitRetry(
+      "https://api.firecrawl.dev/v1/scrape",
+      request,
+      externalSignal,
+    );
     if (!response.ok) {
       const errorBody = (await response.text()).replace(/\s+/g, " ").slice(0, 500);
       throw new Error(`Firecrawl detail HTTP ${response.status}${errorBody ? `: ${errorBody}` : ""}`);
@@ -535,6 +540,35 @@ export class FirecrawlSkill {
     };
     if (!detail.rawHtml && !detail.markdown) throw new Error("Firecrawl detail returned empty content");
     return detail;
+  }
+
+  private async fetchFirecrawlWithRateLimitRetry(
+    url: string,
+    init: RequestInit,
+    externalSignal?: AbortSignal,
+  ): Promise<Response> {
+    let response: Response | undefined;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      // A RequestInit body can be reused when it is a string, as all Firecrawl
+      // calls in this class are. Rebuild the timeout because AbortSignal cannot
+      // be reused after a rate-limit wait.
+      const timeoutSignal = AbortSignal.timeout(105000);
+      const signal = externalSignal ? AbortSignal.any([externalSignal, timeoutSignal]) : timeoutSignal;
+      response = await this.listingFetch(url, { ...init, signal });
+      if (response.status !== 429 || attempt === 2) return response;
+      const body = await response.clone().text().catch(() => "");
+      const retryHeaderText = response.headers.get("retry-after");
+      const retryBodyText = body.match(/retry\s+after\s+(\d+)s/i)?.[1];
+      const retryHeader = retryHeaderText == null || retryHeaderText.trim() === "" ? NaN : Number(retryHeaderText);
+      const retryBody = retryBodyText == null || retryBodyText.trim() === "" ? NaN : Number(retryBodyText);
+      const seconds = Number.isFinite(retryHeader) && retryHeader >= 0
+        ? retryHeader
+        : Number.isFinite(retryBody) && retryBody >= 0 ? retryBody : 15 * (attempt + 1);
+      const waitMs = seconds === 0 ? 0 : Math.min(65000, Math.max(1000, seconds * 1000 + 500));
+      console.warn(`[FirecrawlSkill] Rate limited; retrying detail request in ${Math.ceil(waitMs / 1000)}s.`);
+      await delay(waitMs);
+    }
+    return response!;
   }
 
   private async expandInteractiveDetail(scrapeId: string): Promise<string> {
@@ -1253,7 +1287,7 @@ export function resolveFirecrawlBudget(criteria: SearchCriteria, configured = pr
   // PowerShell value such as RE_FIRECRAWL_REQUEST_BUDGET=15 must not silently
   // disable detail enrichment for the later candidates in a 20-property run.
   const hasFeatureCriteria = Boolean(criteria.exteriorMaterials?.length || criteria.communityFeatures?.length);
-  const minimum = hasSchoolCriteria ? 45 : hasFeatureCriteria ? 25 : 30;
+  const minimum = hasSchoolCriteria ? 70 : hasFeatureCriteria ? 25 : 30;
   const requested = Number(configured);
   return Number.isFinite(requested) && requested > minimum ? Math.min(requested, 100) : minimum;
 }

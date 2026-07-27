@@ -106,8 +106,8 @@ test("school evidence mode retains the full 20-candidate result set", async () =
 
 test("stale low budget environment values cannot disable school detail enrichment", () => {
   const schoolCriteria = { ...defaultSearchCriteria(), location: "Athens, GA", schoolMinRating: 5 };
-  assert.equal(resolveFirecrawlBudget(schoolCriteria, "15"), 45);
-  assert.equal(resolveFirecrawlBudget(schoolCriteria, "60"), 60);
+  assert.equal(resolveFirecrawlBudget(schoolCriteria, "15"), 70);
+  assert.equal(resolveFirecrawlBudget(schoolCriteria, "80"), 80);
   assert.equal(resolveFirecrawlBudget({
     ...defaultSearchCriteria(), location: "Athens, GA", communityFeatures: ["lake"],
   }, "15"), 25);
@@ -461,6 +461,23 @@ test("feature detail requests bypass stale cache and wait for collapsed property
   assert.equal(requestBodies[0].maxAge, 3600000);
   assert.equal(requestBodies[0].waitFor, 3000);
   assert.deepEqual(requestBodies[0].formats, ["rawHtml", "markdown"]);
+});
+
+test("listing detail retries a transient Firecrawl rate limit", async () => {
+  let calls = 0;
+  const mockFetch: typeof fetch = async () => {
+    calls += 1;
+    if (calls === 1) return new Response("Rate limit exceeded; please retry after 0s", { status: 429 });
+    return new Response(JSON.stringify({
+      success: true, data: { rawHtml: "<html>Schools</html>", markdown: "Schools" },
+    }), { status: 200, headers: { "Content-Type": "application/json" } });
+  };
+  const skill = new FirecrawlSkill(mockFetch) as any;
+
+  const result = await skill.scrapeDetail("https://www.realtor.com/example", true);
+
+  assert.equal(calls, 2);
+  assert.match(result.rawHtml, /Schools/);
 });
 
 test("interactive school extraction retries a transient 429 and returns the panel", async () => {
