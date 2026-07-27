@@ -24,7 +24,12 @@ export class WebSocketBridge {
     this.httpServer = createServer((req, res) => {
       if (req.url?.split("?")[0] === "/health") {
         res.writeHead(200, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
-        res.end(JSON.stringify({ status: "ok", service: "real-estate-pi", timestamp: new Date().toISOString() }));
+        res.end(JSON.stringify({
+          status: "ok",
+          service: "real-estate-pi",
+          version: process.env.RENDER_GIT_COMMIT?.slice(0, 7) || "local",
+          timestamp: new Date().toISOString()
+        }));
         return;
       }
       const frontendDir = path.resolve(process.cwd(), "../frontend");

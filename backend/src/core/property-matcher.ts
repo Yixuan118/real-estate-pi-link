@@ -486,9 +486,16 @@ export function assessProperty(property: Property, criteria: SearchCriteria): Pr
       ? undefined : Math.max(threshold, Math.min(10, criteria.schoolAtLeastOneRating));
     const assignmentRequired = criteria.schoolAssignmentRequired === true;
     const alternativePolicy = criteria.schoolAlternativePolicy || "any-eligible-option";
-    const eligible = (property.schools || []).filter((school) => !assignmentRequired
-      || school.relationship === "assigned" || school.relationship === "assignment-option"
-      || school.relationship === "listing-associated");
+    const eligible = (property.schools || []).filter((school) => {
+      const isK12Stage = school.type === "elementary"
+        || school.type === "middle"
+        || school.type === "high"
+        || school.type === "k12";
+      return isK12Stage && (!assignmentRequired
+        || school.relationship === "assigned"
+        || school.relationship === "assignment-option"
+        || school.relationship === "listing-associated");
+    });
     const exactAssigned = eligible.filter((school) => school.relationship !== "assignment-option");
     const assignmentOptions = alternativePolicy === "any-eligible-option"
       ? eligible.filter((school) => school.relationship === "assignment-option") : [];

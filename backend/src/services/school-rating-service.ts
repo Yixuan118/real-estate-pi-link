@@ -36,6 +36,13 @@ export function extractSchoolEvidence(
   for (const school of extractRealtorSchoolPanelCards(normalized, sourceUrl, evidenceSource)) {
     addOrMerge(found, school);
   }
+  // Search-index snippets can expose every school card even when the live
+  // Realtor document lazy-loads the panel and omits its score circles. Keep
+  // the school identity + grade band now; exact school-page lookups add the
+  // source-backed ratings below.
+  for (const school of extractRealtorGradeCards(normalized, sourceUrl, evidenceSource)) {
+    addOrMerge(found, school);
+  }
   const namePattern = /"(?:name|school_name)"\s*:\s*"([^"<>]{3,160})"/gi;
   let match: RegExpExecArray | null;
 
@@ -116,6 +123,17 @@ export function extractSchoolEvidence(
         checkedAt: new Date().toISOString(),
       });
     }
+    const htmlLinkPattern = /<a\b[^>]*href=["'](https?:\/\/(?:www\.)?realtor\.com\/local\/schools\/[^"'?#\s]+)["'][^>]*>([^<]{3,160})<\/a>/gi;
+    while ((link = htmlLinkPattern.exec(linkedSchools)) !== null) {
+      const name = cleanSchoolName(link[2]);
+      if (!name || !looksLikeSchool(name, linkedSchools)) continue;
+      addOrMerge(found, {
+        name, scale: 10, type: inferSchoolType(name, ""), ratingSource: "unknown",
+        evidenceSource: "realtor-listing", sourceUrl: link[1], relationship: "listing-associated",
+        assignmentSource: "realtor-listing", assignmentSourceUrl: sourceUrl,
+        checkedAt: new Date().toISOString(),
+      });
+    }
   }
 
   return [...found.values()];
@@ -144,11 +162,15 @@ export class SchoolRatingService {
     // An exact Realtor property result is still property-associated evidence in
     // strict mode. It is not the same as a broad "schools near this address"
     // search, which must remain nearby-only.
-    const hasLinkedRealtorSchools = schools.some((school) =>
-      school.relationship === "listing-associated" && isRealtorSchoolUrl(school.sourceUrl));
-    if (!hasOfficialSchools && !hasLinkedRealtorSchools
+    const hasCompleteAssociatedStages = hasCompleteSchoolStages(schools.filter((school) =>
+      school.relationship === "listing-associated"));
+    if (!hasOfficialSchools && !hasCompleteAssociatedStages
         && (!schools.length || schools.some((school) => school.rating == null))) {
-      const lookup = await this.searchByProperty(property.title, location || property.location);
+      const lookup = await this.searchByProperty(
+        property.title,
+        location || property.location,
+        property.url,
+      );
       schools = mergeSchools(schools, lookup);
     }
 
@@ -174,7 +196,7 @@ export class SchoolRatingService {
 
   private async lookupAssociatedSchool(school: SchoolEvidence, location: string): Promise<SchoolEvidence[]> {
     if (!isRealtorSchoolUrl(school.sourceUrl)) return this.lookupSchool(school.name, location);
-    return this.cached(`realtor-school:v1:${normalizeCacheKey(school.sourceUrl)}`, async () => {
+    return this.cached(`realtor-school:v2:${normalizeCacheKey(school.sourceUrl)}`, async () => {
       const content = await this.scrapeDedicatedSchoolPage(school.sourceUrl);
       const rating = extractTargetSchoolRating(content, school.name);
       if (rating == null) return [];
@@ -189,9 +211,9 @@ export class SchoolRatingService {
     });
   }
 
-  private async searchByProperty(address: string, location: string): Promise<SchoolEvidence[]> {
-    return this.cached(`property:v5:${normalizeCacheKey(address)}:${normalizeCacheKey(location)}`, () =>
-      this.searchExactPropertyListing(address, location));
+  private async searchByProperty(address: string, location: string, propertyUrl?: string): Promise<SchoolEvidence[]> {
+    return this.cached(`property:v6:${normalizeCacheKey(address)}:${normalizeCacheKey(location)}:${normalizeCacheKey(propertyUrl || "")}`, () =>
+      this.searchExactPropertyListing(address, location, propertyUrl));
   }
 
   private async cached(key: string, producer: () => Promise<SchoolEvidence[]>): Promise<SchoolEvidence[]> {
@@ -214,13 +236,15 @@ export class SchoolRatingService {
     return promise;
   }
 
-  private async searchExactPropertyListing(address: string, location: string): Promise<SchoolEvidence[]> {
+  private async searchExactPropertyListing(address: string, location: string, propertyUrl?: string): Promise<SchoolEvidence[]> {
     firecrawlRequestBudget.consume("property-address school search");
     const response = await this.fetchImpl("https://api.firecrawl.dev/v2/search", {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${this.apiKey}` },
       body: JSON.stringify({
-        query: `"${address}" "${location}" schools "GreatSchools Rating"`,
+        query: propertyUrl
+          ? `site:${canonicalSearchUrl(propertyUrl)} "Grades 9-12" "out of 10"`
+          : `"${address}" "${location}" schools "GreatSchools Rating"`,
         limit: 3, sources: ["web"], includeDomains: ["realtor.com"], country: "US", timeout: 30000,
       }),
       signal: AbortSignal.timeout(40000),
@@ -518,6 +542,52 @@ function extractRealtorSchoolPanelCards(
   return [...found.values()];
 }
 
+function extractRealtorGradeCards(
+  content: string,
+  listingUrl: string,
+  evidenceSource: SchoolEvidence["evidenceSource"],
+): SchoolEvidence[] {
+  const readable = content
+    .replace(/\[Button:\s*([^\]]+)\]/gi, "$1")
+    .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)(?:\s+"[^"]*")?\)/g, "$1")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\s+/g, " ");
+  const found = new Map<string, SchoolEvidence>();
+  // The mandatory "out of 10" boundary prevents this fallback from starting
+  // at unrelated preceding prose or at a previous card's review count.
+  const gradeCardPattern = /\bout\s+of\s+10[.:\s]+([A-Z][A-Za-z0-9'.&()\- ]{2,120}?(?:School|Academy|Institute))[.:\s]+Grades?\s+((?:PK|Pre-?K|K|\d{1,2})\s*[-–—]\s*(?:K|\d{1,2}))/gi;
+  let match: RegExpExecArray | null;
+
+  while ((match = gradeCardPattern.exec(readable)) !== null) {
+    const name = cleanSchoolName(match[1]);
+    const grades = match[2].replace(/\s+/g, "");
+    if (!name || /\bschool district\b|\bpublic schools?\b/i.test(name)) continue;
+    addOrMerge(found, {
+      name,
+      scale: 10,
+      type: inferSchoolTypeFromGrades(grades, name),
+      grades,
+      ratingSource: "unknown",
+      evidenceSource,
+      sourceUrl: listingUrl,
+      relationship: evidenceSource === "realtor-listing" ? "listing-associated" : "nearby",
+      assignmentSource: evidenceSource === "realtor-listing" ? "realtor-listing" : undefined,
+      assignmentSourceUrl: evidenceSource === "realtor-listing" ? listingUrl : undefined,
+      checkedAt: new Date().toISOString(),
+    });
+  }
+  return [...found.values()];
+}
+
+function canonicalSearchUrl(value: string): string {
+  try {
+    const parsed = new URL(value);
+    return `${parsed.hostname}${parsed.pathname}`.replace(/\/+$/, "");
+  } catch {
+    return value.replace(/^https?:\/\//i, "").split(/[?#]/)[0].replace(/\/+$/, "");
+  }
+}
+
 function looksLikeSchool(name: string, context: string): boolean {
   if (/\bschool district\b|\bpublic schools?\b/i.test(name)) return false;
   return /school|academy|elementary|middle|high|institute/i.test(name)
@@ -704,6 +774,7 @@ function addOrMerge(target: Map<string, SchoolEvidence>, school: SchoolEvidence)
   } else {
     const preserveRelationship = existing.relationship === "assigned" || existing.relationship === "assignment-option"
       || existing.relationship === "listing-associated";
+    const preserveExistingSource = existing.rating != null || isRealtorSchoolUrl(existing.sourceUrl);
     target.set(key, {
       ...existing,
       rating: existing.rating ?? school.rating,
@@ -713,9 +784,9 @@ function addOrMerge(target: Map<string, SchoolEvidence>, school: SchoolEvidence)
       distanceMiles: existing.distanceMiles ?? school.distanceMiles,
       studentCount: existing.studentCount ?? school.studentCount,
       reviewCount: existing.reviewCount ?? school.reviewCount,
-      evidenceSource: existing.rating != null ? existing.evidenceSource : school.evidenceSource,
-      sourceUrl: existing.rating != null ? existing.sourceUrl : school.sourceUrl,
-      checkedAt: existing.rating != null ? existing.checkedAt : school.checkedAt,
+      evidenceSource: preserveExistingSource ? existing.evidenceSource : school.evidenceSource,
+      sourceUrl: preserveExistingSource ? existing.sourceUrl : school.sourceUrl,
+      checkedAt: preserveExistingSource ? existing.checkedAt : school.checkedAt,
       relationship: preserveRelationship ? existing.relationship : school.relationship,
       assignmentSource: existing.assignmentSource || school.assignmentSource,
       assignmentSourceUrl: existing.assignmentSourceUrl || school.assignmentSourceUrl,
@@ -728,6 +799,12 @@ function mergeSchools(current: SchoolEvidence[], incoming: SchoolEvidence[]): Sc
   current.forEach((school) => addOrMerge(merged, school));
   incoming.forEach((school) => addOrMerge(merged, school));
   return [...merged.values()];
+}
+
+function hasCompleteSchoolStages(schools: SchoolEvidence[]): boolean {
+  const stages = new Set(schools.map((school) => school.type));
+  return stages.has("k12")
+    || (stages.has("elementary") && stages.has("middle") && stages.has("high"));
 }
 
 function isRealtorSchoolUrl(value: string): boolean {

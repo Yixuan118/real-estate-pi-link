@@ -154,6 +154,77 @@ test("classifies the complete 40 Webb Portland panel as failed instead of unreso
   assert.equal(match.checks.find((check) => /K-12 schools/.test(check.criterion))?.status, "failed");
 });
 
+test("extracts all three Portland school identities from an exact Realtor search snippet", () => {
+  const schools = extractSchoolEvidence(`
+    40 Webb St, Portland, ME 04102 [Updated 7/20]
+    out of 10. Amanda C Rowe School. Grades K-5 · 0.4 mi away ;
+    out of 10. Lincoln Middle School. Grades 6-8 · 1.2 mi away ;
+    out of 10. Deering High School. Grades 9-12.
+  `, "https://www.realtor.com/realestateandhomes-detail/40-Webb-St_Portland_ME_04102_M35641-79717");
+
+  assert.deepEqual(schools.map((school) => [school.name, school.type, school.grades, school.rating]), [
+    ["Amanda C Rowe School", "elementary", "K-5", undefined],
+    ["Lincoln Middle School", "middle", "6-8", undefined],
+    ["Deering High School", "high", "9-12", undefined],
+  ]);
+});
+
+test("uses the exact Realtor URL to recover lazy-loaded school stages", async () => {
+  const requestedBodies: any[] = [];
+  const listingUrl = "https://www.realtor.com/realestateandhomes-detail/40-Webb-St_Portland_ME_04102_M35641-79717?from=srp";
+  const ratings = new Map([
+    ["Amanda-C-Rowe-School", ["Amanda C Rowe School", 4]],
+    ["Lincoln-Middle-School", ["Lincoln Middle School", 6]],
+    ["Deering-High-School", ["Deering High School", 2]],
+  ]);
+  const mockFetch = (async (input: string | URL, init?: RequestInit) => {
+    const body = JSON.parse(String(init?.body || "{}"));
+    requestedBodies.push(body);
+    if (String(input).endsWith("/v2/search") && String(body.query).startsWith("site:")) {
+      return new Response(JSON.stringify({ data: { web: [{
+        title: "40 Webb St, Portland, ME 04102",
+        url: listingUrl,
+        description: "out of 10. Amanda C Rowe School. Grades K-5; out of 10. Lincoln Middle School. Grades 6-8; out of 10. Deering High School. Grades 9-12.",
+      }] } }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    if (String(input).endsWith("/v2/search")) {
+      const found = [...ratings.entries()].find(([slug]) =>
+        String(body.query).toLowerCase().includes(slug.replace(/-/g, " ").toLowerCase()));
+      const [slug, [name, rating]] = found!;
+      return new Response(JSON.stringify({ data: { web: [{
+        title: name,
+        url: `https://www.realtor.com/local/schools/${slug}-0001`,
+        markdown: `# ${name}\nPortland, ME\n${rating}/10 GreatSchools Rating`,
+      }] } }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    throw new Error(`Unexpected request: ${input}`);
+  }) as typeof fetch;
+  const property = {
+    id: "portland-40-webb",
+    title: "40 Webb St, Portland, ME 04102",
+    price: 399000,
+    bedrooms: 1,
+    bathrooms: 1,
+    sqft: 721,
+    location: "Portland, ME 04102",
+    features: [],
+    url: listingUrl,
+    listedAt: new Date().toISOString(),
+    source: "Realtor.com",
+  };
+
+  const enriched = await new SchoolRatingService("test-key", mockFetch, "")
+    .enrichProperty(property, "Portland, ME", { strictAssignment: true });
+
+  assert.match(requestedBodies[0]?.query || "", /^site:www\.realtor\.com\/realestateandhomes-detail\/40-Webb-St_/);
+  assert.doesNotMatch(requestedBodies[0]?.query || "", /\?from=srp/);
+  assert.deepEqual(enriched.schools?.map((school) => [school.name, school.rating, school.type]), [
+    ["Amanda C Rowe School", 4, "elementary"],
+    ["Lincoln Middle School", 6, "middle"],
+    ["Deering High School", 2, "high"],
+  ]);
+});
+
 test("extracts property-associated schools from Realtor's server-rendered nearby-school links", () => {
   const content = `The schools near 1080 Belmont Rd, include
     [Whit Davis Road Elementary School](https://www.realtor.com/local/schools/Whit-Davis-Road-Elementary-School-0718577561),
@@ -172,6 +243,32 @@ test("extracts property-associated schools from Realtor's server-rendered nearby
     "https://www.realtor.com/local/schools/Hilsman-Middle-School-0718577401",
   ]);
   assert.ok(schools.every((school) => school.assignmentSourceUrl === "https://www.realtor.com/example"));
+});
+
+test("extracts property-associated school URLs from Realtor raw HTML", () => {
+  const listingUrl = "https://www.realtor.com/realestateandhomes-detail/40-Webb-St_Portland_ME_04102";
+  const schools = extractSchoolEvidence(`
+    <p>The schools near 40 Webb St, include
+      <a href="https://www.realtor.com/local/schools/Amanda-C-Rowe-School-0732860521">Amanda C Rowe School</a>,
+      <a href="https://www.realtor.com/local/schools/Lincoln-Middle-School-0732860561">Lincoln Middle School</a> and
+      <a href="https://www.realtor.com/local/schools/Breakwater-School-0732868221">Breakwater School</a>.
+    </p>
+    Nearby Cities
+    out of 10. Amanda C Rowe School. Grades K-5;
+    out of 10. Lincoln Middle School. Grades 6-8;
+    out of 10. Deering High School. Grades 9-12.
+  `, listingUrl);
+
+  assert.deepEqual(["Amanda C Rowe School", "Lincoln Middle School", "Breakwater School"].map((name) => {
+    const school = schools.find((candidate) => candidate.name === name);
+    return [school?.name, school?.sourceUrl];
+  }), [
+    ["Amanda C Rowe School", "https://www.realtor.com/local/schools/Amanda-C-Rowe-School-0732860521"],
+    ["Lincoln Middle School", "https://www.realtor.com/local/schools/Lincoln-Middle-School-0732860561"],
+    ["Breakwater School", "https://www.realtor.com/local/schools/Breakwater-School-0732868221"],
+  ]);
+  assert.equal(schools.find((school) => school.name === "Amanda C Rowe School")?.type, "elementary");
+  assert.equal(schools.find((school) => school.name === "Deering High School")?.type, "high");
 });
 
 test("uses property-linked Realtor school pages without a broad school search", async () => {
