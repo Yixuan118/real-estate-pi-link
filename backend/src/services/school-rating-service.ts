@@ -111,11 +111,11 @@ export function extractSchoolEvidence(
   const nearbySentencePattern = /(?:the\s+)?schools?\s+near\s+.{1,240}?\s+include\s+([\s\S]{1,1800}?)(?=\bNearby\s+Cities\b|\bNearby\s+Neighborhoods\b|\bSimilar\s+Homes\b|$)/gi;
   while ((match = nearbySentencePattern.exec(normalized)) !== null) {
     const linkedSchools = match[1];
-    const linkPattern = /\[([^\]]{3,160}?(?:Elementary|Middle|High)(?:\s+School)?)\]\((https?:\/\/(?:www\.)?realtor\.com\/local\/schools\/[^)\s]+)\)/gi;
+    const linkPattern = /\[([^\]]{3,160})\]\((https?:\/\/(?:www\.)?realtor\.com\/local\/schools\/[^)\s]+)\)/gi;
     let link: RegExpExecArray | null;
     while ((link = linkPattern.exec(linkedSchools)) !== null) {
       const name = cleanSchoolName(link[1]);
-      if (!name) continue;
+      if (!name || !looksLikeSchool(name, linkedSchools)) continue;
       addOrMerge(found, {
         name, scale: 10, type: inferSchoolType(name, ""), ratingSource: "unknown",
         evidenceSource: "realtor-listing", sourceUrl: link[2], relationship: "listing-associated",
@@ -165,8 +165,7 @@ export class SchoolRatingService {
     // search, which must remain nearby-only.
     const hasCompleteAssociatedStages = hasCompleteSchoolStages(schools.filter((school) =>
       school.relationship === "listing-associated"));
-    if (!hasOfficialSchools && !hasCompleteAssociatedStages
-        && (!schools.length || schools.some((school) => school.rating == null))) {
+    if (!hasOfficialSchools && !hasCompleteAssociatedStages) {
       const lookup = await this.searchByProperty(
         property.title,
         location || property.location,
@@ -197,13 +196,16 @@ export class SchoolRatingService {
 
   private async lookupAssociatedSchool(school: SchoolEvidence, location: string): Promise<SchoolEvidence[]> {
     if (!isRealtorSchoolUrl(school.sourceUrl)) return this.lookupSchool(school.name, location);
-    return this.cached(`realtor-school:v3:${normalizeCacheKey(school.sourceUrl)}`, async () => {
+    return this.cached(`realtor-school:v5:${normalizeCacheKey(school.sourceUrl)}`, async () => {
       const content = await this.scrapeDedicatedSchoolPage(school.sourceUrl);
       const rating = extractDedicatedSchoolPageRating(content, school.name);
       if (rating == null) return [];
+      const gradeProfile = extractDedicatedSchoolGradeProfile(content, school.name);
       return [{
         ...school,
         rating,
+        type: school.type === "other" ? gradeProfile.type : school.type,
+        grades: school.grades || gradeProfile.grades,
         ratingSource: "GreatSchools",
         evidenceSource: "realtor-school-page",
         sourceUrl: school.sourceUrl,
@@ -213,7 +215,7 @@ export class SchoolRatingService {
   }
 
   private async searchByProperty(address: string, location: string, propertyUrl?: string): Promise<SchoolEvidence[]> {
-    return this.cached(`property:v10:${normalizeCacheKey(address)}:${normalizeCacheKey(location)}:${normalizeCacheKey(propertyUrl || "")}`, () =>
+    return this.cached(`property:v15:${normalizeCacheKey(address)}:${normalizeCacheKey(location)}:${normalizeCacheKey(propertyUrl || "")}`, () =>
       this.searchExactPropertyListing(address, location, propertyUrl));
   }
 
@@ -281,6 +283,15 @@ export class SchoolRatingService {
       for (const [type, term] of stageQueries) {
         if (schools.some((school) => school.type === type || school.type === "k12")) continue;
         await runSearch(`site:${canonicalUrl} ${term}`, `property ${type} school search`);
+      }
+      if (!hasCompleteSchoolStages(schools)) {
+        const buildingAddress = address.replace(/\b(?:unit|apt|apartment|#)\s*[^,]+/i, "").split(",")[0].trim();
+        if (buildingAddress && buildingAddress.length >= 5) {
+          await runSearch(
+            `"${buildingAddress}" "The schools near"`,
+            "same-building school roster search",
+          );
+        }
       }
     }
     return mergeSchools([], schools);
@@ -544,6 +555,31 @@ export function extractDedicatedSchoolPageRating(content: string, schoolName: st
   const dedicated = validRating(beforeLabel?.[1] || afterLabel?.[1]);
   if (dedicated != null) return dedicated;
   return schoolName ? extractTargetSchoolRating(content, schoolName) : undefined;
+}
+
+function extractDedicatedSchoolGradeProfile(
+  content: string,
+  schoolName: string,
+): { type: SchoolEvidence["type"]; grades?: string } {
+  const readable = content.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ");
+  const lower = readable.toLowerCase();
+  const targetName = schoolName.toLowerCase();
+  let from = 0;
+  let profile = readable.slice(0, 5000);
+  let grades: string | undefined;
+  while (targetName && from < readable.length) {
+    const target = lower.indexOf(targetName, from);
+    if (target < 0) break;
+    profile = readable.slice(target, target + 1800);
+    grades = profile.match(/\b((?:PK|Pre-?K|K|\d{1,2})\s*[-–—]\s*(?:K|\d{1,2}))\b/i)?.[1]
+      ?.replace(/\s+/g, "");
+    if (grades) break;
+    from = target + targetName.length;
+  }
+  return {
+    type: grades ? inferSchoolTypeFromGrades(grades, schoolName) : inferSchoolType(schoolName, profile),
+    grades,
+  };
 }
 
 function escapeRegExp(value: string): string {
