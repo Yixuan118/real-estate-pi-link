@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { extractPropertyEvidence } from "../core/property-matcher";
+import { extractCoreListingMetrics, extractPropertyEvidence } from "../core/property-matcher";
 import { defaultSearchCriteria, Property, UserSession } from "../core/types";
 import { canonicalMarketLocation, detailNeedsInteractiveExpansion, extractInteractText, FirecrawlSkill, isSchoolOnlyDetailRequest, prepareDetailEvidenceContent, prepareSearchPagePropertyEvidence, prioritizeCandidatesForCriteria, requiresListingDetail, resolveFeatureEnrichmentLimit, resolveFirecrawlBudget, selectCachedLiveProperties, shouldUseCachedMarket, shouldVerifyBathroomsSeparately } from "./firecrawl-skill";
 
@@ -221,6 +221,21 @@ test("large Realtor search pages are reduced to bounded per-property evidence wi
   );
   assert.ok(evidence.length < 20_000);
   assert.match(evidence, /beds 2 baths 2\.5/);
+});
+
+test("same-price listings cannot donate bathroom metrics to another address", () => {
+  const content = [
+    "10 Other St, Athens, GA 30606 $995,000 5 beds 2 baths 4,000 sqft",
+    "x".repeat(3000),
+    "155 Creek Plantation Dr, Athens, GA 30606 $995,000 5 beds 4.5 baths 4,712 sqft",
+  ].join(" ");
+  const evidence = prepareSearchPagePropertyEvidence(
+    content, "155 Creek Plantation Dr, Athens, GA 30606", 995000,
+  );
+  const metrics = extractCoreListingMetrics(evidence, "155 Creek Plantation Dr, Athens, GA 30606");
+  assert.equal(metrics.bathrooms, 4.5);
+  assert.equal(metrics.sqft, 4712);
+  assert.doesNotMatch(evidence, /10 Other St/);
 });
 
 test("bounded pagination supplements a heavily filtered first page without merging distinct units", async () => {
@@ -482,4 +497,22 @@ test("prior-live fallback keeps real Realtor listings and rejects demo or wrong-
   assert.match(result[0].source, /cached prior live/i);
   assert.equal(result[0].criteriaMatch, undefined);
   assert.equal(result[0].bathrooms, 2);
+});
+
+test("prior-session fallback hides an unverified bathroom number instead of repeating it", () => {
+  const now = Date.parse("2026-07-27T12:00:00.000Z");
+  const property: Property = {
+    id: "stale", title: "155 Creek Plantation Dr, Athens, GA 30606", price: 995000,
+    bedrooms: 5, bathrooms: 2, sqft: 4712, location: "Athens, GA 30606", features: [],
+    url: "https://www.realtor.com/stale", listedAt: new Date(now).toISOString(), source: "Realtor.com",
+  };
+  const session: UserSession = {
+    id: "stale-session", userId: "u", criteria: defaultSearchCriteria(), conversation: [],
+    watchedProperties: [], matchedProperties: [property], monitoringInterval: 3600000,
+    lastCheckAt: null, createdAt: new Date(now).toISOString(), updatedAt: new Date(now).toISOString(),
+  };
+  const result = selectCachedLiveProperties([session], "Athens, GA", 86400000, 20, now);
+  assert.equal(result[0].bathrooms, 0);
+  assert.equal(result[0].fullBathrooms, undefined);
+  assert.equal(result[0].halfBathrooms, undefined);
 });

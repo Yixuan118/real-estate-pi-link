@@ -105,7 +105,7 @@ export function extractPropertyEvidence(property: Property, content: string): Pr
   }
 
   const coreMetrics = extractCoreListingMetrics(text, property.title);
-  const bathroomBreakdown = extractExplicitBathroomBreakdown(text);
+  const hasCurrentBathroomTotal = coreMetrics.bathrooms != null;
 
   const schools = mergeSchoolEvidence(property.schools || [], extractSchoolEvidence(content, property.url || "", "realtor-listing"));
   const listingFacts = mergeListingFacts(property.listingFacts || {}, extractListingFacts(content));
@@ -114,9 +114,12 @@ export function extractPropertyEvidence(property: Property, content: string): Pr
   return {
     ...property,
     bedrooms: coreMetrics.bedrooms ?? property.bedrooms,
-    bathrooms: bathroomBreakdown?.bathrooms ?? coreMetrics.bathrooms ?? property.bathrooms,
-    fullBathrooms: bathroomBreakdown?.fullBathrooms ?? coreMetrics.fullBathrooms ?? property.fullBathrooms,
-    halfBathrooms: bathroomBreakdown?.halfBathrooms ?? coreMetrics.halfBathrooms ?? property.halfBathrooms,
+    bathrooms: coreMetrics.bathrooms ?? property.bathrooms,
+    // A newly extracted total without a matching breakdown must clear a stale
+    // full/half split. Otherwise an old "2 full + 1 half" can survive after
+    // the exact property page has established a total of 2.
+    fullBathrooms: hasCurrentBathroomTotal ? coreMetrics.fullBathrooms : property.fullBathrooms,
+    halfBathrooms: hasCurrentBathroomTotal ? coreMetrics.halfBathrooms : property.halfBathrooms,
     sqft: coreMetrics.sqft ?? property.sqft,
     sqftSource: coreMetrics.sqftSource ?? property.sqftSource,
     description: property.description || extractListingDescription(listingEvidenceText) || visibleText.slice(0, 3000),
@@ -208,20 +211,40 @@ export function extractCoreListingMetrics(
   const windows: string[] = [];
   if (address) {
     const lower = normalized.toLowerCase();
-    const needle = address.toLowerCase();
-    let from = 0;
-    while (windows.length < 8) {
-      const index = lower.indexOf(needle, from);
-      if (index < 0) break;
-      windows.push(normalized.slice(index, index + 700));
-      from = index + needle.length;
+    const needles = [...new Set([
+      address.toLowerCase(),
+      address.toLowerCase().replace(/\bapt\b/g, "unit"),
+      address.toLowerCase().replace(/\bunit\b/g, "apt"),
+    ])];
+    for (const needle of needles) {
+      let from = 0;
+      while (windows.length < 10) {
+        const index = lower.indexOf(needle, from);
+        if (index < 0) break;
+        windows.push(normalized.slice(Math.max(0, index - 120), index + 3500));
+        from = index + needle.length;
+      }
     }
   }
-  windows.push(normalized.slice(0, 5000));
+  // With a property identity, never fall back to the beginning of a market or
+  // search-result document: that is how another listing's baths get assigned
+  // to the requested address.
+  if (!address) windows.push(normalized.slice(0, 5000));
+  if (!windows.length) return {};
+  // Detail-page bathroom fields outrank the compact card summary. Realtor can
+  // expose an old "1.5 bath" card before the current "2 full + 1 half" MLS
+  // breakdown for the same address.
+  const authorityScore = (window: string): number =>
+    (/\bFull Bathrooms?\b|\b\d+\s+full bathrooms?\b/i.test(window) ? 8 : 0)
+    + (/\b(?:Half|1\s*\/\s*2) Bathrooms?\b|\b\d+\s+(?:half|partial) bathrooms?\b/i.test(window) ? 8 : 0)
+    + (/\bTotal Bathrooms?\b/i.test(window) ? 4 : 0)
+    + (/\b(?:Living Area|Total Square Feet Living|Building Area Total)\b/i.test(window) ? 2 : 0);
+  windows.sort((left, right) => authorityScore(right) - authorityScore(left));
 
   for (const window of windows) {
     const explicitSqft = firstMetric(window, [
       /\bLiving Area(?: Total)?\s*[:\-]?\s*([\d,]{3,})\s*(?:sq\.?\s*ft\.?|sqft|square feet)?/i,
+      /\bTotal Square Feet Living\s*[:\-]?\s*([\d,]{3,})\s*(?:sq\.?\s*ft\.?|sqft|square feet)?/i,
       /\bBuilding Area Total\s*[:\-]?\s*([\d,]{3,})\s*(?:sq\.?\s*ft\.?|sqft|square feet)?/i,
       /\bAbove Grade Finished Area\s*[:\-]?\s*([\d,]{3,})\s*(?:sq\.?\s*ft\.?|sqft|square feet)?/i,
       /["'](?:livingArea|buildingArea|sqft)["']\s*:\s*["']?([\d,]{3,})/i,
@@ -234,7 +257,7 @@ export function extractCoreListingMetrics(
       /\b(\d+)\s+(?:ba|baths?)\b(?=.{0,60}\b\d+\s+half\s+(?:ba|baths?)\b)/i,
       /["'](?:numberOfFullBathrooms|bathroomsFull|baths_full)["']\s*:\s*(\d+)/i,
     ]);
-    const halfBathrooms = firstMetric(window, [
+    const halfBathrooms = firstNonNegativeMetric(window, [
       /\bHalf Bathrooms?\s*[:\-]?\s*(\d+)\b/i,
       /\b1\s*\/\s*2 Bathrooms?\s*[:\-]?\s*(\d+)\b/i,
       /\b(\d+)\s+(?:half|partial) bathrooms?\b/i,
@@ -257,13 +280,35 @@ export function extractCoreListingMetrics(
         ...(explicitSqft != null ? { sqft: explicitSqft, sqftSource: "detail-page" as const } : {}),
       };
     }
+    if (fullBathrooms != null && explicitTotal != null) {
+      const fractionalDifference = explicitTotal - fullBathrooms;
+      // An integer MLS "Total Bathrooms" may count rooms (4 full + 1 half =
+      // 5), so derive a half count only when total equals full or the displayed
+      // total is already fractional.
+      if (fractionalDifference === 0 || (!Number.isInteger(explicitTotal)
+          && fractionalDifference > 0 && fractionalDifference < 5
+          && Math.abs(fractionalDifference * 2 - Math.round(fractionalDifference * 2)) < 0.001)) {
+        const derivedHalfBathrooms = Math.round(fractionalDifference * 2);
+        return {
+          bathrooms: fullBathrooms + (derivedHalfBathrooms * 0.5),
+          fullBathrooms,
+          halfBathrooms: derivedHalfBathrooms,
+          ...(explicitSqft != null ? { sqft: explicitSqft, sqftSource: "detail-page" as const } : {}),
+        };
+      }
+    }
+    const usableExplicitTotal = fullBathrooms != null && halfBathrooms == null
+      && Number.isInteger(explicitTotal) && (explicitTotal as number) > fullBathrooms
+      ? undefined
+      : explicitTotal;
 
     const labelFirst = window.match(/\bbeds?\s*(\d+(?:\.\d+)?)\s+baths?\s*(\d+(?:\.\d+)?)\s+(?:sqft\s*)?(?:square\s+feet\s*)?([\d,]{3,})?/i);
     const valueFirst = window.match(/\b(\d+(?:\.\d+)?)\s*beds?\s+(\d+(?:\.\d+)?)\s*baths?\s+([\d,]{3,})\s*(?:sqft|square\s+feet)\b/i);
-    const match = labelFirst || valueFirst;
+    const proseSummary = window.match(/\b(\d+)\s+bedrooms?\b[^.;]{0,100}\b(\d+(?:\.\d+)?)\s+bathrooms?\b/i);
+    const match = labelFirst || valueFirst || proseSummary;
     if (!match) continue;
     const bedrooms = validMetric(match[1], 0, 20);
-    const bathrooms = explicitTotal ?? validMetric(match[2], 0, 20);
+    const bathrooms = usableExplicitTotal ?? validMetric(match[2], 0, 20);
     const cardSqft = validMetric(match[3]?.replace(/,/g, ""), 100, 100000);
     const sqft = explicitSqft ?? cardSqft;
     if (bedrooms != null || bathrooms != null || sqft != null) {
@@ -272,9 +317,9 @@ export function extractCoreListingMetrics(
         ...(sqft != null ? { sqftSource: explicitSqft != null ? "detail-page" as const : "listing-card" as const } : {}),
       };
     }
-    if (explicitTotal != null || explicitSqft != null) {
+    if (usableExplicitTotal != null || explicitSqft != null) {
       return {
-        bathrooms: explicitTotal,
+        bathrooms: usableExplicitTotal,
         sqft: explicitSqft,
         ...(explicitSqft != null ? { sqftSource: "detail-page" as const } : {}),
       };
@@ -283,44 +328,20 @@ export function extractCoreListingMetrics(
   return {};
 }
 
-function extractExplicitBathroomBreakdown(content: string): {
-  bathrooms: number;
-  fullBathrooms: number;
-  halfBathrooms: number;
-} | undefined {
-  const find = (patterns: RegExp[]): { value: number; index: number } | undefined => {
-    for (const pattern of patterns) {
-      const match = pattern.exec(content);
-      const value = Number(match?.[1]);
-      if (match?.index != null && Number.isInteger(value) && value >= 0 && value < 20) {
-        return { value, index: match.index };
-      }
-    }
-    return undefined;
-  };
-  const full = find([
-    /\bFull Bathrooms?\s*[:\-]?\s*(\d+)\b/i,
-    /\b(\d+)\s+full bathrooms?\b/i,
-    /\b(\d+)\s+full baths?\b/i,
-  ]);
-  const half = find([
-    /\b1\s*\/\s*2 Bathrooms?\s*[:\-]?\s*(\d+)\b/i,
-    /\bHalf Bathrooms?\s*[:\-]?\s*(\d+)\b/i,
-    /\b(\d+)\s+(?:half|partial) bathrooms?\b/i,
-    /\b(\d+)\s+half baths?\b/i,
-  ]);
-  if (!full || !half || Math.abs(full.index - half.index) > 1200) return undefined;
-  return {
-    bathrooms: full.value + (half.value * 0.5),
-    fullBathrooms: full.value,
-    halfBathrooms: half.value,
-  };
-}
-
 function firstMetric(content: string, patterns: RegExp[], minimum = 0, maximum = 20): number | undefined {
   for (const pattern of patterns) {
     const value = Number(String(content.match(pattern)?.[1] || "").replace(/,/g, ""));
     if (Number.isFinite(value) && value > minimum && value < maximum) return value;
+  }
+  return undefined;
+}
+
+function firstNonNegativeMetric(content: string, patterns: RegExp[], maximum = 20): number | undefined {
+  for (const pattern of patterns) {
+    const match = content.match(pattern);
+    if (!match) continue;
+    const value = Number(String(match[1]).replace(/,/g, ""));
+    if (Number.isInteger(value) && value >= 0 && value < maximum) return value;
   }
   return undefined;
 }

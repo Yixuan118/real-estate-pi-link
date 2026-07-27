@@ -111,3 +111,28 @@ test("verifies a new-construction bathroom breakdown by exact address and caches
   );
   assert.equal(second.bathrooms, 2.5);
 });
+
+test("bathroom verification keeps apartment numbers and rejects another unit", async () => {
+  const mockFetch = (async () => new Response(JSON.stringify({ data: { web: [
+    {
+      title: "1305 Cedar Shoals Dr Apt 201, Athens, GA 30605",
+      description: "2 full bathrooms and 1 partial bathroom.",
+      url: "https://www.realtor.com/realestateandhomes-detail/1305-Cedar-Shoals-Dr-Apt-201_Athens_GA_30605",
+    },
+    {
+      title: "1305 Cedar Shoals Dr Apt 501, Athens, GA 30605",
+      description: "Total Bathrooms: 2. Full Bathrooms: 2.",
+      url: "https://www.realtor.com/realestateandhomes-detail/1305-Cedar-Shoals-Dr-Apt-501_Athens_GA_30605",
+    },
+  ] } }), { status: 200, headers: { "Content-Type": "application/json" } })) as typeof fetch;
+  const property: Property = {
+    id: "unit-501", title: "1305 Cedar Shoals Dr Apt 501, Athens, GA 30605",
+    price: 214000, bedrooms: 2, bathrooms: 2.5, sqft: 1176,
+    location: "Athens, GA 30605", features: ["new construction"], url: "https://www.realtor.com/unit-501",
+    listedAt: new Date().toISOString(), source: "Realtor.com",
+  };
+  const enriched = await new ListingEvidenceSearchService("key", mockFetch).enrichBathroomDetails(property);
+  assert.equal(enriched.bathrooms, 2);
+  assert.equal(enriched.fullBathrooms, 2);
+  assert.equal(enriched.halfBathrooms, 0);
+});

@@ -344,8 +344,11 @@ function formatBathrooms(property) {
   const total = Number(property.bathrooms);
   const full = Number(property.fullBathrooms);
   const half = Number(property.halfBathrooms);
-  if (full > 0 && half > 0) return `${total || full + half} baths (${full} full, ${half} half)`;
-  if (full > 0) return `${total || full} baths (${full} full)`;
+  const breakdownTotal = full > 0 && half >= 0 ? full + (half * 0.5) : 0;
+  // The server normally enforces this invariant. Recompute defensively so the
+  // UI can never display an internally contradictory total and breakdown.
+  if (full > 0 && half > 0) return `${breakdownTotal} baths (${full} full, ${half} half)`;
+  if (full > 0) return `${breakdownTotal || total || full} baths (${full} full)`;
   return total > 0 ? `${total} baths` : "Baths unavailable";
 }
 

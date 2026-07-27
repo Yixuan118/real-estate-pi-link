@@ -74,7 +74,8 @@ export class FirecrawlSkill {
       }
 
       // Version the cache whenever core metric normalization changes.
-      const cacheKey = `v4:${targetUrl.toLowerCase()}`;
+      // v5 invalidates records created before property-scoped bath extraction.
+      const cacheKey = `v5:${targetUrl.toLowerCase()}`;
       const cachedMarket = this.listingCache.get(cacheKey);
       // A basic market cache normally contains only the first result page.
       // Feature searches intentionally inspect additional pages so likely
@@ -252,9 +253,9 @@ export class FirecrawlSkill {
       .slice(0, resultLimit)
       .map(addCoreDataDiagnostic);
     const needsListingDetail = requiresListingDetail(criteria);
-    // Realtor new-construction cards often report only full baths (for example,
-    // "2 bath") while the builder/MLS record says "2 full + 1 half". Verify
-    // only these high-risk cards, with a small independent cap and cache.
+    // Realtor new-construction cards sometimes omit half baths. Verify only
+    // these high-risk cards against their own Realtor detail URL; never use a
+    // broad exact-address search that can confuse units in the same building.
     if (enrich && listingEvidenceSearchService.enabled && shouldVerifyBathroomsSeparately(criteria)) {
       const limit = Math.max(0, Math.min(Number(process.env.RE_BATHROOM_VERIFY_LIMIT || 5), 10));
       const indexes = candidates.map((property, index) => ({ property, index }))
@@ -263,14 +264,20 @@ export class FirecrawlSkill {
         .slice(0, limit);
       await mapWithConcurrency(indexes, 2, async ({ index }) => {
         try {
-          const enriched = await listingEvidenceSearchService.enrichBathroomDetails(candidates[index]);
-          const verified = enriched.fullBathrooms != null && enriched.halfBathrooms != null;
+          const property = candidates[index];
+          if (!property.url) return;
+          const url = property.url.startsWith("http") ? property.url : `https://www.realtor.com${property.url.startsWith("/") ? "" : "/"}${property.url}`;
+          const detail = await this.scrapeDetail(url, false, false);
+          const enriched = extractPropertyEvidence(property, prepareDetailEvidenceContent(
+            detail.markdown, detail.rawHtml, criteria, property.title,
+          ));
+          const verified = enriched.bathrooms > 0;
           candidates[index] = addDiagnostic(enriched, "listing-search", verified ? "success" : "warning", verified
-            ? `Bathroom breakdown verified: ${enriched.fullBathrooms} full and ${enriched.halfBathrooms} half (${enriched.bathrooms} baths).`
-            : "Exact-address sources did not provide a full/half bathroom breakdown; the Realtor summary count may omit half baths.");
+            ? `Bathroom total verified from the exact Realtor property page: ${enriched.bathrooms} baths${enriched.fullBathrooms != null ? ` (${enriched.fullBathrooms} full, ${enriched.halfBathrooms || 0} half)` : ""}.`
+            : "The exact Realtor property page did not provide a usable bathroom total.");
         } catch (error) {
           candidates[index] = addDiagnostic(candidates[index], "listing-search", "warning",
-            `Bathroom breakdown verification failed: ${error instanceof Error ? error.message : String(error)}`);
+            `Exact Realtor bathroom verification failed: ${error instanceof Error ? error.message : String(error)}`);
         }
       });
     }
@@ -1016,12 +1023,13 @@ function propertyEvidenceFromNormalizedSearchPage(
   price: number,
 ): string {
   const address = propertyTitle.split(",")[0].trim().toLowerCase();
-  const needles = [
+  // Price is not an identity: many properties share it. Address-only windows
+  // prevent a same-price listing from donating its beds/baths/sqft.
+  const needles = [...new Set([
     address,
-    price > 0 ? `$${price.toLocaleString("en-US")}`.toLowerCase() : "",
-    price > 0 ? `"price":"${price}"` : "",
-    price > 0 ? `"price":${price}` : "",
-  ].filter((needle, index, all) => needle && all.indexOf(needle) === index);
+    address.replace(/\bapt\b/g, "unit"),
+    address.replace(/\bunit\b/g, "apt"),
+  ].filter(Boolean))];
   const ranges: Array<[number, number]> = [];
 
   for (const needle of needles) {
@@ -1038,7 +1046,7 @@ function propertyEvidenceFromNormalizedSearchPage(
     }
   }
 
-  if (!ranges.length) return normalized.slice(0, 5000);
+  if (!ranges.length) return "";
   return ranges
     .sort(([left], [right]) => left - right)
     .slice(0, 10)
@@ -1226,7 +1234,7 @@ export function selectCachedLiveProperties(
       if (!key || seen.has(key)) continue;
       seen.add(key);
       results.push(addDiagnostic(
-        clearDerivedMatch(repairCachedCoreMetrics({ ...property, source: "Realtor.com (cached prior live result)" })),
+        clearDerivedMatch(sanitizePriorSessionCoreMetrics({ ...property, source: "Realtor.com (cached prior live result)" })),
         "listing-search",
         "warning",
         `Cached from a prior live Realtor search saved at ${session.updatedAt}.`,
@@ -1235,6 +1243,16 @@ export function selectCachedLiveProperties(
     }
   }
   return results;
+}
+
+function sanitizePriorSessionCoreMetrics(property: Property): Property {
+  const repaired = repairCachedCoreMetrics(property);
+  const content = [property.listingEvidenceText, property.description].filter(Boolean).join("\n");
+  const evidenceMetrics = content ? extractCoreListingMetrics(content, property.title) : {};
+  if (evidenceMetrics.bathrooms != null) return repaired;
+  // A session fallback can be several days old and may predate parser fixes.
+  // Showing "Baths unavailable" is safer than repeating an unverified number.
+  return { ...repaired, bathrooms: 0, fullBathrooms: undefined, halfBathrooms: undefined };
 }
 
 function clearDerivedMatch(property: Property): Property {
@@ -1249,6 +1267,7 @@ function repairCachedCoreMetrics(property: Property): Property {
   const content = [property.listingEvidenceText, property.description].filter(Boolean).join("\n");
   if (!content) return property;
   const metrics = extractCoreListingMetrics(content, property.title);
+  const hasCurrentBathroomTotal = metrics.bathrooms != null;
   const features = hasNewConstructionEvidence(content, property.title)
     && !(property.features || []).some((feature) => /new construction/i.test(feature))
     ? [...(property.features || []), "new construction"]
@@ -1258,8 +1277,8 @@ function repairCachedCoreMetrics(property: Property): Property {
     features,
     bedrooms: metrics.bedrooms ?? property.bedrooms,
     bathrooms: metrics.bathrooms ?? property.bathrooms,
-    fullBathrooms: metrics.fullBathrooms ?? property.fullBathrooms,
-    halfBathrooms: metrics.halfBathrooms ?? property.halfBathrooms,
+    fullBathrooms: hasCurrentBathroomTotal ? metrics.fullBathrooms : property.fullBathrooms,
+    halfBathrooms: hasCurrentBathroomTotal ? metrics.halfBathrooms : property.halfBathrooms,
     sqft: metrics.sqft ?? property.sqft,
     sqftSource: metrics.sqftSource ?? property.sqftSource ?? (property.sqft > 0 ? "cached" : undefined),
   };

@@ -12,6 +12,65 @@ test("uses full and half bathroom evidence instead of an incomplete summary coun
   assert.deepEqual(metrics, { bathrooms: 2.5, fullBathrooms: 2, halfBathrooms: 1 });
 });
 
+test("bathroom extraction is scoped to the exact property instead of a preceding listing", () => {
+  const content = [
+    "999 Other St, Athens, GA 30606 Total Bathrooms: 3 Full Bathrooms: 2 1/2 Bathrooms: 1",
+    "x".repeat(4000),
+    "155 Creek Plantation Dr, Athens, GA 30606 Total Bathrooms: 5 Full Bathrooms: 4 1/2 Bathrooms: 1 Total Square Feet Living: 4712",
+  ].join(" ");
+  assert.deepEqual(extractCoreListingMetrics(content, "155 Creek Plantation Dr, Athens, GA 30606"), {
+    bathrooms: 4.5, fullBathrooms: 4, halfBathrooms: 1, sqft: 4712, sqftSource: "detail-page",
+  });
+});
+
+test("an exact total plus full-bath count establishes zero half baths", () => {
+  const metrics = extractCoreListingMetrics(
+    "1305 Cedar Shoals Dr Apt 501, Athens, GA 30605 Total Bathrooms: 2 Full Bathrooms: 2",
+    "1305 Cedar Shoals Dr Apt 501, Athens, GA 30605",
+  );
+  assert.deepEqual(metrics, { bathrooms: 2, fullBathrooms: 2, halfBathrooms: 0 });
+});
+
+test("detail bathroom fields outrank an older card total for the same address", () => {
+  const address = "256 Wood Lake Dr, Athens, GA 30606";
+  const content = [
+    `${address} 2 beds 1.5 baths 1,863 sqft`,
+    "x".repeat(4000),
+    `${address} Total Bathrooms: 3 Full Bathrooms: 2 1/2 Bathrooms: 1`,
+  ].join(" ");
+  const metrics = extractCoreListingMetrics(content, address);
+  assert.equal(metrics.bathrooms, 2.5);
+  assert.equal(metrics.fullBathrooms, 2);
+  assert.equal(metrics.halfBathrooms, 1);
+});
+
+test("integer MLS room count does not override a consumer-facing fractional bath count", () => {
+  const address = "155 Creek Plantation Dr, Athens, GA 30606";
+  const content = [
+    `${address} 5 beds 4.5 baths 4,712 sqft`,
+    "x".repeat(4000),
+    `${address} Bathroom Information Total Bathrooms: 5 Full Bathrooms: 4`,
+  ].join(" ");
+  const metrics = extractCoreListingMetrics(content, address);
+  assert.equal(metrics.bathrooms, 4.5);
+});
+
+test("fresh exact-property totals clear a stale cached bathroom breakdown", () => {
+  const property: Property = {
+    id: "unit-501", title: "1305 Cedar Shoals Dr Apt 501, Athens, GA 30605",
+    price: 214000, bedrooms: 2, bathrooms: 2.5, fullBathrooms: 2, halfBathrooms: 1,
+    sqft: 1176, location: "Athens, GA 30605", features: [], url: "",
+    listedAt: new Date().toISOString(), source: "test",
+  };
+  const repaired = extractPropertyEvidence(
+    property,
+    "1305 Cedar Shoals Dr Apt 501, Athens, GA 30605 is a 2 bedroom, 2 bathroom condo.",
+  );
+  assert.equal(repaired.bathrooms, 2);
+  assert.equal(repaired.fullBathrooms, undefined);
+  assert.equal(repaired.halfBathrooms, undefined);
+});
+
 test("explicit living area overrides a nearby lot-size-like card value", () => {
   const metrics = extractCoreListingMetrics(
     "10 Main St, Boise, ID 83702 Living Area: 1,809 sqft Lot Size: 7,405 sqft 3 beds 2 baths 7,405 sqft",
@@ -198,7 +257,8 @@ test("256 Wood Lake keeps the Realtor lake excerpt and displays 2 full plus 1 ha
     bedrooms: 2, bathrooms: 1.5, sqft: 1863, location: "Athens, GA 30606",
     features: [], url: "https://www.realtor.com/realestateandhomes-detail/256-Wood-Lake-Dr_Athens_GA_30606_M68277-44687",
     listedAt: new Date().toISOString(), source: "Realtor.com",
-  }, `Property details
+  }, `256 Wood Lake Dr, Athens, GA 30606
+    Property details
     This home has 2 full bathrooms and 1 partial bathroom.
     This gated neighborhood includes a community pool, and lake, surrounded by trees.
   `);

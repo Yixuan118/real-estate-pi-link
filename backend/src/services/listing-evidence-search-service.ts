@@ -173,11 +173,9 @@ export class ListingEvidenceSearchService {
     if (!response.ok) throw new Error(`Firecrawl bathroom verification HTTP ${response.status}`);
     const payload: any = await response.json();
     const web = Array.isArray(payload.data?.web) ? payload.data.web : Array.isArray(payload.data) ? payload.data : [];
-    const expectedTokens = normalizeAddress(address).split(" ").filter((token) => token.length > 2).slice(0, 4);
     const relevant = web.filter((item: any) => {
       const content = `${item.title || ""} ${item.description || ""} ${item.markdown || ""}`;
-      const normalized = normalizeAddress(content);
-      return expectedTokens.every((token) => normalized.includes(token))
+      return isExactAddressResult(item, address)
         && /\b(?:full|half|partial|total)\s+(?:ba|bath|bathroom)/i.test(content);
     });
     return {
@@ -188,7 +186,11 @@ export class ListingEvidenceSearchService {
 }
 
 function normalizeAddress(value: string): string {
-  return value.toLowerCase().replace(/\b(?:unit|apt)\s+[^,]+/g, " ").replace(/[^a-z0-9]+/g, " ").trim();
+  return value.toLowerCase()
+    .replace(/\b(?:apartment|unit|apt)\s*#?\s*([a-z0-9-]+)/g, " apt $1 ")
+    .replace(/#\s*([a-z0-9-]+)/g, " apt $1 ")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
 }
 
 function isExactAddressResult(item: any, address: string): boolean {
