@@ -106,8 +106,9 @@ test("school evidence mode retains the full 20-candidate result set", async () =
 
 test("stale low budget environment values cannot disable school detail enrichment", () => {
   const schoolCriteria = { ...defaultSearchCriteria(), location: "Athens, GA", schoolMinRating: 5 };
-  assert.equal(resolveFirecrawlBudget(schoolCriteria, "15"), 100);
-  assert.equal(resolveFirecrawlBudget(schoolCriteria, "80"), 100);
+  assert.equal(resolveFirecrawlBudget(schoolCriteria, "15"), 50);
+  assert.equal(resolveFirecrawlBudget(schoolCriteria, "80"), 50);
+  assert.equal(resolveFirecrawlBudget(schoolCriteria, "100"), 50);
   assert.equal(resolveFirecrawlBudget({
     ...defaultSearchCriteria(), location: "Athens, GA", communityFeatures: ["lake"],
   }, "15"), 25);

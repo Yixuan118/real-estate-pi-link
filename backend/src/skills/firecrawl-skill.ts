@@ -4,7 +4,7 @@ import { assessProperty, extractCoreListingMetrics, extractPropertyEvidence, pro
 import * as store from "../core/store";
 import type { UserSession } from "../core/types";
 import { geoValidationService } from "../services/geo-validation-service";
-import { schoolRatingService } from "../services/school-rating-service";
+import { hasHardSchoolRatingFailure, schoolRatingService } from "../services/school-rating-service";
 import { officialSchoolAssignmentService } from "../services/official-school-assignment-service";
 import { listingEvidenceSearchService } from "../services/listing-evidence-search-service";
 import { firecrawlRequestBudget } from "../services/firecrawl-request-budget";
@@ -439,6 +439,7 @@ export class FirecrawlSkill {
         try {
           const enriched = await schoolRatingService.enrichProperty(candidates[index], criteria.location, {
             strictAssignment: criteria.schoolAssignmentRequired === true,
+            minimumRating: criteria.schoolMinRating,
           });
           const rated = (enriched.schools || []).filter((school) => school.rating != null);
           const assignedRatings = rated.filter((school) => school.relationship === "assigned" || school.relationship === "assignment-option" || school.relationship === "listing-associated").length;
@@ -469,6 +470,11 @@ export class FirecrawlSkill {
         if (hasCompleteRealtorSchoolEvidence(property)) {
           candidates[index] = addDiagnostic(property, "school-assignment", "success",
             "Reused complete elementary/middle/high school evidence displayed on the Realtor property page; official-locator fallback was not needed.");
+          return;
+        }
+        if (hasHardSchoolRatingFailure(property.schools || [], criteria.schoolMinRating)) {
+          candidates[index] = addDiagnostic(property, "school-assignment", "success",
+            "Official-locator fallback was skipped because a source-backed property-associated school already falls below the hard minimum rating.");
           return;
         }
         if (property.latitude == null || property.longitude == null) {
@@ -1290,8 +1296,12 @@ export function resolveFirecrawlBudget(criteria: SearchCriteria, configured = pr
   // PowerShell value such as RE_FIRECRAWL_REQUEST_BUDGET=15 must not silently
   // disable detail enrichment for the later candidates in a 20-property run.
   const hasFeatureCriteria = Boolean(criteria.exteriorMaterials?.length || criteria.communityFeatures?.length);
-  const minimum = hasSchoolCriteria ? 100 : hasFeatureCriteria ? 25 : 30;
+  const minimum = hasSchoolCriteria ? 50 : hasFeatureCriteria ? 25 : 30;
   const requested = Number(configured);
+  // A stale deployment value of 100 previously allowed a single school query
+  // to consume roughly 100 credits. Direct profile resolution and hard-fail
+  // short-circuiting make 50 a sufficient and absolute school-search ceiling.
+  if (hasSchoolCriteria) return 50;
   return Number.isFinite(requested) && requested > minimum ? Math.min(requested, 100) : minimum;
 }
 

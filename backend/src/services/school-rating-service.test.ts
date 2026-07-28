@@ -6,8 +6,10 @@ import { join } from "node:path";
 import {
   extractDedicatedSchoolPageRating,
   extractGreatSchoolsRating,
+  extractRedfinAssignedSchoolEvidence,
   extractSchoolEvidence,
   extractTargetSchoolRating,
+  isExactStreetAndZipResult,
   SchoolRatingService,
 } from "./school-rating-service";
 import { assessProperty } from "../core/property-matcher";
@@ -503,6 +505,83 @@ test("uses a direct dedicated-school page without consuming another Firecrawl re
   assert.equal(enriched.schools?.[0]?.rating, 4);
   assert.equal(directCalls, 1);
   assert.equal(firecrawlCalls, 0);
+});
+
+test("stops enrichment as soon as a source-backed school fails the hard floor", async () => {
+  let calls = 0;
+  const mockFetch = (async () => {
+    calls += 1;
+    return new Response("unexpected", { status: 500 });
+  }) as typeof fetch;
+  const property = {
+    id: "failed", title: "88 Mayer Rd, Portland, ME 04102", price: 1, bedrooms: 3, bathrooms: 1.5, sqft: 1744,
+    location: "Portland, ME 04102", features: [], url: "https://www.realtor.com/example",
+    listedAt: new Date().toISOString(), source: "test",
+    schools: [{
+      name: "Amanda C Rowe School", rating: 4, type: "elementary" as const, scale: 10 as const,
+      ratingSource: "GreatSchools" as const, evidenceSource: "realtor-school-page" as const,
+      sourceUrl: "https://www.realtor.com/local/schools/Amanda-C-Rowe-School-0732860521",
+      relationship: "listing-associated" as const, checkedAt: new Date().toISOString(),
+    }],
+  };
+
+  const result = await new SchoolRatingService("test-key", mockFetch, "")
+    .enrichProperty(property, property.location, { minimumRating: 5 });
+
+  assert.equal(result.schools?.[0]?.rating, 4);
+  assert.equal(calls, 0);
+});
+
+test("extracts exact-address Redfin assigned K-12 ratings and rejects a wrong ZIP", async () => {
+  const content = `
+    Howard C Reiche Community School Public PreK-5 • Assigned • 4.2mi 3/10
+    King Middle School Public 6-8 • Assigned • 4.3mi 2/10
+    Portland High School Public 9-12 • Assigned • 3.6mi 4/10`;
+  const schools = extractRedfinAssignedSchoolEvidence(content, "https://www.redfin.com/ME/Diamond-Cove/218-W-Shore-Dr-04109/home/85750340");
+  assert.deepEqual(schools.map((school) => [school.type, school.rating, school.relationship]), [
+    ["elementary", 3, "assigned"], ["middle", 2, "assigned"], ["high", 4, "assigned"],
+  ]);
+  assert.equal(isExactStreetAndZipResult({
+    title: "218 W Shore Dr, Diamond Cove, ME 04109",
+    url: "https://www.redfin.com/ME/Diamond-Cove/218-W-Shore-Dr-04109/home/85750340",
+  }, "218 W Shore Dr, Portland, ME 04109"), true);
+  assert.equal(isExactStreetAndZipResult({
+    title: "218 W Shore Dr, Milton, DE 19968",
+    url: "https://www.redfin.com/DE/Milton/218-W-Shore-Dr-19968/home/example",
+  }, "218 W Shore Dr, Portland, ME 04109"), false);
+});
+
+test("uses one exact-address Redfin fallback when Realtor exposes no school panel", async () => {
+  let calls = 0;
+  const mockFetch = (async (_url: string, init?: RequestInit) => {
+    calls += 1;
+    if (String(_url).endsWith("/v2/scrape")) {
+      return new Response(JSON.stringify({ data: { markdown: `
+        Howard C Reiche Community School Public PreK-5 • Assigned • 4.2mi 3/10
+        King Middle School Public 6-8 • Assigned • 4.3mi 2/10
+        Portland High School Public 9-12 • Assigned • 3.6mi 4/10`,
+      } }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    const body = JSON.parse(String(init?.body || "{}"));
+    if (body.includeDomains?.[0] === "redfin.com") {
+      return new Response(JSON.stringify({ data: { web: [{
+        title: "218 W Shore Dr, Diamond Cove, ME 04109",
+        url: "https://www.redfin.com/ME/Diamond-Cove/218-W-Shore-Dr-04109/home/85750340",
+        description: "Exact property result",
+      }] } }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    return new Response(JSON.stringify({ data: { web: [] } }), { status: 200, headers: { "Content-Type": "application/json" } });
+  }) as typeof fetch;
+  const property = {
+    id: "island", title: "218 W Shore Dr, Portland, ME 04109", price: 2100000, bedrooms: 3, bathrooms: 3, sqft: 1,
+    location: "Portland, ME 04109", features: [], url: "", listedAt: new Date().toISOString(), source: "test",
+  };
+
+  const result = await new SchoolRatingService("test-key", mockFetch, "")
+    .enrichProperty(property, property.location, { minimumRating: 5 });
+
+  assert.deepEqual(result.schools?.map((school) => school.rating), [3, 2, 4]);
+  assert.equal(calls, 3);
 });
 
 test("strict mode rejects school evidence from a non-exact Realtor property result", async () => {

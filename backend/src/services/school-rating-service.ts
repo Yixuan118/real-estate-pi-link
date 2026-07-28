@@ -152,7 +152,11 @@ export class SchoolRatingService {
 
   get enabled(): boolean { return Boolean(this.apiKey); }
 
-  async enrichProperty(property: Property, location?: string, options: { strictAssignment?: boolean } = {}): Promise<Property> {
+  async enrichProperty(
+    property: Property,
+    location?: string,
+    options: { strictAssignment?: boolean; minimumRating?: number } = {},
+  ): Promise<Property> {
     if (!this.enabled) return property;
     const current = property.schools || [];
     const resolvedLocation = location || property.location;
@@ -160,7 +164,13 @@ export class SchoolRatingService {
     // These are direct public-page reads and do not consume Firecrawl budget.
     // Previously an expensive missing-stage search ran first and could exhaust
     // the entire request budget before these known links were ever scored.
-    let schools = await this.resolveMissingRatings(current, resolvedLocation);
+    let schools = await this.resolveMissingRatings(current, resolvedLocation, options.minimumRating);
+    // A source-backed score below the user's hard floor is already a complete
+    // reason to reject this property. Do not spend more Firecrawl credits
+    // filling stages that cannot change that outcome.
+    if (hasHardSchoolRatingFailure(schools, options.minimumRating)) {
+      return { ...property, schools };
+    }
 
     const hasOfficialSchools = schools.some((school) =>
       school.relationship === "assigned" || school.relationship === "assignment-option");
@@ -182,14 +192,31 @@ export class SchoolRatingService {
       }
     }
 
-    schools = await this.resolveMissingRatings(schools, resolvedLocation);
+    schools = await this.resolveMissingRatings(schools, resolvedLocation, options.minimumRating);
     return { ...property, schools };
   }
 
-  private async resolveMissingRatings(schools: SchoolEvidence[], location: string): Promise<SchoolEvidence[]> {
+  private async resolveMissingRatings(
+    schools: SchoolEvidence[],
+    location: string,
+    minimumRating?: number,
+  ): Promise<SchoolEvidence[]> {
     const missing = schools.filter((school) => school.rating == null).slice(0, 8);
     let resolvedSchools = schools;
     if (missing.length) {
+      if (minimumRating != null) {
+        let firstFailure: unknown;
+        for (const school of missing) {
+          try {
+            resolvedSchools = mergeSchools(resolvedSchools, await this.lookupAssociatedSchool(school, location));
+          } catch (error) {
+            firstFailure ??= error;
+          }
+          if (hasHardSchoolRatingFailure(resolvedSchools, minimumRating)) return resolvedSchools;
+        }
+        if (firstFailure && !resolvedSchools.some((school) => school.rating != null)) throw firstFailure;
+        return resolvedSchools;
+      }
       const resolved = await Promise.allSettled(missing.map((school) =>
         this.lookupAssociatedSchool(school, location)));
       const successful = resolved.flatMap((result) => result.status === "fulfilled" ? result.value : []);
@@ -229,7 +256,7 @@ export class SchoolRatingService {
   }
 
   private async searchByProperty(address: string, location: string, propertyUrl?: string): Promise<SchoolEvidence[]> {
-    return this.cached(`property:v15:${normalizeCacheKey(address)}:${normalizeCacheKey(location)}:${normalizeCacheKey(propertyUrl || "")}`, () =>
+    return this.cached(`property:v19:${normalizeCacheKey(address)}:${normalizeCacheKey(location)}:${normalizeCacheKey(propertyUrl || "")}`, () =>
       this.searchExactPropertyListing(address, location, propertyUrl));
   }
 
@@ -255,13 +282,19 @@ export class SchoolRatingService {
 
   private async searchExactPropertyListing(address: string, location: string, propertyUrl?: string): Promise<SchoolEvidence[]> {
     const schools: SchoolEvidence[] = [];
-    const runSearch = async (query: string, label: string): Promise<void> => {
+    const runSearch = async (
+      query: string,
+      label: string,
+      domains: string[] = ["realtor.com"],
+      parser: (content: string, url: string) => SchoolEvidence[] =
+        (content, url) => extractSchoolEvidence(content, url, "realtor-listing"),
+    ): Promise<void> => {
       firecrawlRequestBudget.consume(label);
       const response = await this.fetchFirecrawlWithRateLimitRetry("https://api.firecrawl.dev/v2/search", {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${this.apiKey}` },
         body: JSON.stringify({
-          query, limit: 3, sources: ["web"], includeDomains: ["realtor.com"], country: "US", timeout: 30000,
+          query, limit: 3, sources: ["web"], includeDomains: domains, country: "US", timeout: 30000,
         }),
       });
       if (!response.ok) throw new Error(`Firecrawl school search HTTP ${response.status}`);
@@ -270,11 +303,55 @@ export class SchoolRatingService {
       const web = Array.isArray(payload.data?.web) ? payload.data.web : Array.isArray(payload.data) ? payload.data : [];
       for (const item of web) {
         const url = String(item.url || "");
-        if (!/^https?:\/\/(?:www\.)?realtor\.com\//i.test(url)) continue;
-        if (!isExactPropertyResult(item, address)) continue;
+        if (!domains.some((domain) => urlHostMatches(url, domain))) continue;
+        if (domains.includes("realtor.com") && !/realtor\.com\/realestateandhomes-detail\//i.test(url)) continue;
+        if (domains.includes("redfin.com") && !/redfin\.com\/.+\/home\/\d+/i.test(url)) continue;
+        if (!isExactStreetAndZipResult(item, address)) continue;
         const content = [item.title, item.description, item.markdown].filter(Boolean).join("\n");
-        schools.push(...extractSchoolEvidence(content, url, "realtor-listing"));
+        schools.push(...parser(content, url));
       }
+    };
+    let redfinFallbackAttempted = false;
+    const runRedfinFallback = async (): Promise<void> => {
+      if (redfinFallbackAttempted) return;
+      redfinFallbackAttempted = true;
+      const zip = address.match(/\b\d{5}(?:-\d{4})?\b/)?.[0];
+      const street = address.split(",")[0].trim();
+      if (!zip || !street) return;
+      const searchLabel = "exact-address assigned-school fallback";
+      firecrawlRequestBudget.consume(searchLabel);
+      const searchResponse = await this.fetchFirecrawlWithRateLimitRetry("https://api.firecrawl.dev/v2/search", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${this.apiKey}` },
+        body: JSON.stringify({
+          query: `site:redfin.com "${street}" "${zip}"`,
+          limit: 5, sources: ["web"], includeDomains: ["redfin.com"], country: "US", timeout: 30000,
+        }),
+      });
+      if (!searchResponse.ok) throw new Error(`Firecrawl assigned-school fallback search HTTP ${searchResponse.status}`);
+      const searchPayload: any = await searchResponse.json();
+      firecrawlRequestBudget.settle(searchLabel, searchPayload.creditsUsed);
+      const web = Array.isArray(searchPayload.data?.web)
+        ? searchPayload.data.web : Array.isArray(searchPayload.data) ? searchPayload.data : [];
+      const exact = web.find((item: any) =>
+        /redfin\.com\/.+\/home\/\d+/i.test(String(item.url || ""))
+        && isExactStreetAndZipResult(item, address));
+      if (!exact?.url) return;
+
+      const scrapeLabel = "exact-address Redfin property schools";
+      firecrawlRequestBudget.consume(scrapeLabel);
+      const scrapeResponse = await this.fetchFirecrawlWithRateLimitRetry("https://api.firecrawl.dev/v2/scrape", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${this.apiKey}` },
+        body: JSON.stringify({
+          url: exact.url, formats: ["markdown"], onlyMainContent: false, maxAge: 0, timeout: 30000,
+        }),
+      });
+      if (!scrapeResponse.ok) throw new Error(`Firecrawl assigned-school fallback page HTTP ${scrapeResponse.status}`);
+      const scrapePayload: any = await scrapeResponse.json();
+      firecrawlRequestBudget.settle(scrapeLabel, scrapePayload.creditsUsed);
+      const content = String(scrapePayload.data?.markdown || scrapePayload.data?.content || "");
+      schools.push(...extractRedfinAssignedSchoolEvidence(content, String(exact.url)));
     };
 
     const canonicalUrl = propertyUrl ? canonicalSearchUrl(propertyUrl) : "";
@@ -284,6 +361,10 @@ export class SchoolRatingService {
         : `"${address}" "${location}" schools "GreatSchools Rating"`,
       "property-address school search",
     );
+    // Some Realtor pages do not expose their lazy school panel to the search
+    // index at all. A single exact-address Redfin property result is a safer
+    // and cheaper fallback than three blind Realtor stage searches.
+    if (!schools.length) await runRedfinFallback();
     if (propertyUrl) {
       // Search snippets are often truncated immediately before the high-school
       // name (for example they contain only “Grades 9-12”). Ask the index for
@@ -307,6 +388,7 @@ export class SchoolRatingService {
           );
         }
       }
+      if (!hasCompleteSchoolStages(schools)) await runRedfinFallback();
     }
     return mergeSchools([], schools);
   }
@@ -449,19 +531,61 @@ function isDedicatedSchoolHost(sourceUrl: string): boolean {
   }
 }
 
-function isExactPropertyResult(item: any, address: string): boolean {
+export function isExactStreetAndZipResult(item: any, address: string): boolean {
   const normalizeAddress = (value: string) => value.toLowerCase()
-    .replace(/\b(?:unit|apt)\s+[^,]+/g, " ")
+    .replace(/\b(?:unit|apt|apartment)\s+[^,]+/g, " ")
     .replace(/[^a-z0-9]+/g, " ").trim();
-  const expected = normalizeAddress(address);
-  const expectedWithoutZip = expected.replace(/\s+\d{5}(?:\s+\d{4})?$/, "").trim();
-  const identities = [...new Set([expected, expectedWithoutZip].filter((value) => value.length >= 8))];
-  const title = normalizeAddress(String(item.title || ""));
+  const zip = String(address).match(/\b(\d{5})(?:-\d{4})?\b/)?.[1];
+  if (!zip) return false;
+  const street = normalizeAddress(String(address).split(",")[0]);
+  if (street.length < 5) return false;
+  const title = normalizeAddress([item.title, item.description].filter(Boolean).join(" "));
   let url = String(item.url || "");
   try { url = decodeURIComponent(url); } catch { /* Preserve malformed URLs for conservative matching. */ }
-  const normalizedUrl = normalizeAddress(url);
-  return identities.some((identity) =>
-    title === identity || title.startsWith(`${identity} `) || normalizedUrl.includes(identity));
+  const identity = `${title} ${normalizeAddress(url)}`;
+  return new RegExp(`\\b${escapeRegExp(zip)}\\b`).test(identity)
+    && identity.includes(street);
+}
+
+function urlHostMatches(value: string, expectedDomain: string): boolean {
+  try {
+    const host = new URL(value).hostname.toLowerCase().replace(/^www\./, "");
+    return host === expectedDomain || host.endsWith(`.${expectedDomain}`);
+  } catch {
+    return false;
+  }
+}
+
+export function extractRedfinAssignedSchoolEvidence(content: string, sourceUrl: string): SchoolEvidence[] {
+  const readable = content
+    .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)(?:\s+"[^"]*")?\)/g, "$1")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/[•·|]/g, " ")
+    .replace(/\s+/g, " ");
+  const found = new Map<string, SchoolEvidence>();
+  // Redfin search/property text uses:
+  // "School Name Public PreK-5 Assigned 4.2mi 3/10".
+  const pattern = /([A-Z][A-Za-z0-9'.&()\- ]{2,120}?(?:School|Academy|Institute))\s+(?:Public|Private|Charter)?\s*((?:PK|Pre-?K|K|\d{1,2})\s*[-–—]\s*(?:K|\d{1,2}))\s+Assigned\b[^0-9]{0,20}(?:[\d.]+\s*mi(?:les?)?)?\s*(\d{1,2})\s*\/\s*10/gi;
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(readable)) !== null) {
+    const name = cleanSchoolName(match[1].replace(/^.*\b(?:Transit|Schools)\s+/i, ""));
+    const grades = match[2].replace(/\s+/g, "");
+    const rating = validRating(match[3]);
+    if (!name || rating == null) continue;
+    addOrMerge(found, {
+      name,
+      rating,
+      scale: 10,
+      type: inferSchoolTypeFromGrades(grades, name),
+      grades,
+      ratingSource: "GreatSchools",
+      evidenceSource: "firecrawl-search",
+      sourceUrl,
+      relationship: "assigned",
+      checkedAt: new Date().toISOString(),
+    });
+  }
+  return [...found.values()];
 }
 
 function isDedicatedSchoolPage(sourceUrl: string, schoolName: string | string[]): boolean {
@@ -632,10 +756,10 @@ function inferSchoolType(name: string, context: string): SchoolEvidence["type"] 
 
 function inferSchoolTypeFromGrades(grades: string, name: string): SchoolEvidence["type"] {
   const normalizedGrades = grades.toUpperCase().replace(/\s+/g, "").replace(/[–—]/g, "-");
-  if (/^(?:PK|PRE-K|K)-5$/.test(normalizedGrades)) return "elementary";
+  if (/^(?:PK|PREK|PRE-K|K)-5$/.test(normalizedGrades)) return "elementary";
   if (/^6-8$/.test(normalizedGrades)) return "middle";
   if (/^9-12$/.test(normalizedGrades)) return "high";
-  if (/^(?:PK|PRE-K|K)-12$/.test(normalizedGrades)) return "k12";
+  if (/^(?:PK|PREK|PRE-K|K)-12$/.test(normalizedGrades)) return "k12";
   return inferSchoolType(name, `Grades ${grades}`);
 }
 
@@ -977,6 +1101,20 @@ function hasCompleteSchoolStages(schools: SchoolEvidence[]): boolean {
   const stages = new Set(schools.map((school) => school.type));
   return stages.has("k12")
     || (stages.has("elementary") && stages.has("middle") && stages.has("high"));
+}
+
+export function hasHardSchoolRatingFailure(
+  schools: SchoolEvidence[],
+  minimumRating?: number,
+): boolean {
+  if (minimumRating == null) return false;
+  return schools.some((school) =>
+    school.rating != null
+    && school.rating < minimumRating
+    && school.type !== "other"
+    && (school.relationship === "assigned"
+      || school.relationship === "assignment-option"
+      || school.relationship === "listing-associated"));
 }
 
 function isRealtorSchoolUrl(value: string): boolean {
