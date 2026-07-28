@@ -155,9 +155,15 @@ export class SchoolRatingService {
   async enrichProperty(property: Property, location?: string, options: { strictAssignment?: boolean } = {}): Promise<Property> {
     if (!this.enabled) return property;
     const current = property.schools || [];
-    let schools = current;
+    const resolvedLocation = location || property.location;
+    // Resolve the school links already present on the Realtor listing first.
+    // These are direct public-page reads and do not consume Firecrawl budget.
+    // Previously an expensive missing-stage search ran first and could exhaust
+    // the entire request budget before these known links were ever scored.
+    let schools = await this.resolveMissingRatings(current, resolvedLocation);
 
-    const hasOfficialSchools = schools.some((school) => school.relationship === "assigned" || school.relationship === "assignment-option");
+    const hasOfficialSchools = schools.some((school) =>
+      school.relationship === "assigned" || school.relationship === "assignment-option");
     // In strict assignment mode, an address search can only return nearby schools
     // and therefore cannot repair a missing official assignment.
     // An exact Realtor property result is still property-associated evidence in
@@ -166,26 +172,34 @@ export class SchoolRatingService {
     const hasCompleteAssociatedStages = hasCompleteSchoolStages(schools.filter((school) =>
       school.relationship === "listing-associated"));
     if (!hasOfficialSchools && !hasCompleteAssociatedStages) {
-      const lookup = await this.searchByProperty(
-        property.title,
-        location || property.location,
-        property.url,
-      );
-      schools = mergeSchools(schools, lookup);
+      try {
+        const lookup = await this.searchByProperty(property.title, resolvedLocation, property.url);
+        schools = mergeSchools(schools, lookup);
+      } catch (error) {
+        // A depleted Firecrawl budget must not discard ratings already
+        // recovered from exact Realtor school links.
+        if (!schools.some((school) => school.rating != null)) throw error;
+      }
     }
 
-    const missing = schools.filter((school) => school.rating == null).slice(0, 6);
+    schools = await this.resolveMissingRatings(schools, resolvedLocation);
+    return { ...property, schools };
+  }
+
+  private async resolveMissingRatings(schools: SchoolEvidence[], location: string): Promise<SchoolEvidence[]> {
+    const missing = schools.filter((school) => school.rating == null).slice(0, 8);
+    let resolvedSchools = schools;
     if (missing.length) {
       const resolved = await Promise.allSettled(missing.map((school) =>
-        this.lookupAssociatedSchool(school, location || property.location)));
+        this.lookupAssociatedSchool(school, location)));
       const successful = resolved.flatMap((result) => result.status === "fulfilled" ? result.value : []);
-      schools = mergeSchools(schools, successful);
-      if (!successful.length) {
+      resolvedSchools = mergeSchools(resolvedSchools, successful);
+      if (!successful.length && !resolvedSchools.some((school) => school.rating != null)) {
         const failure = resolved.find((result): result is PromiseRejectedResult => result.status === "rejected");
         if (failure) throw failure.reason;
       }
     }
-    return { ...property, schools };
+    return resolvedSchools;
   }
 
   async lookupSchool(name: string, location?: string): Promise<SchoolEvidence[]> {

@@ -429,27 +429,9 @@ export class FirecrawlSkill {
       });
     }
 
-    if ((criteria.schoolMinRating != null || criteria.schoolAtLeastOneRating != null) && enrich) {
-      const limit = Math.max(1, Math.min(Number(process.env.RE_SCHOOL_ENRICH_LIMIT || 20), 20));
-      const concurrency = Math.max(1, Math.min(Number(process.env.RE_SCHOOL_CONCURRENCY || 2), 4));
-      candidates = candidates.map((property, index) => index < limit ? property
-        : addDiagnostic(property, "school-rating", "warning", `School rating enrichment limit ${limit} reached.`));
-      await mapWithConcurrency(candidates.slice(0, limit).map((_, index) => index), concurrency, async (index) => {
-        let property = candidates[index];
-        if (hasCompleteRealtorSchoolEvidence(property)) {
-          candidates[index] = addDiagnostic(property, "school-assignment", "success",
-            "Reused complete elementary/middle/high school evidence displayed on the Realtor property page; official-locator fallback was not needed.");
-          return;
-        }
-        if (property.latitude == null || property.longitude == null) {
-          property = geoValidationService.enabled
-            ? await geoValidationService.ensureCoordinates(property)
-            : addDiagnostic(property, "school-assignment", "warning", "No HERE/Google geocoder is configured for official school assignment lookup.");
-        }
-        candidates[index] = await officialSchoolAssignmentService.enrichProperty(property);
-      });
-    }
-
+    // Score the exact Realtor school links before invoking official-locator
+    // fallbacks. Direct school profile reads do not consume Firecrawl budget,
+    // and complete K-12 evidence can avoid the expensive locator entirely.
     if ((criteria.schoolMinRating != null || criteria.schoolAtLeastOneRating != null) && enrich && schoolRatingService.enabled) {
       const limit = Math.max(1, Math.min(Number(process.env.RE_SCHOOL_ENRICH_LIMIT || 20), 20));
       const concurrency = Math.max(1, Math.min(Number(process.env.RE_SCHOOL_CONCURRENCY || 2), 4));
@@ -469,12 +451,33 @@ export class FirecrawlSkill {
               : "No source-backed K-12 rating was found through the listing or targeted Realtor search.");
         } catch (error) {
           candidates[index] = addDiagnostic(candidates[index], "school-rating", "error",
-            `Firecrawl school rating search failed: ${error instanceof Error ? error.message : String(error)}`);
+            `School rating enrichment failed: ${error instanceof Error ? error.message : String(error)}`);
         }
       });
     } else if ((criteria.schoolMinRating != null || criteria.schoolAtLeastOneRating != null) && !schoolRatingService.enabled) {
       candidates = candidates.map((property) => addDiagnostic(property, "school-rating", "error",
         "FIRECRAWL_API_KEY is not configured; school ratings cannot be verified."));
+    }
+
+    if ((criteria.schoolMinRating != null || criteria.schoolAtLeastOneRating != null) && enrich) {
+      const limit = Math.max(1, Math.min(Number(process.env.RE_SCHOOL_ENRICH_LIMIT || 20), 20));
+      const concurrency = Math.max(1, Math.min(Number(process.env.RE_SCHOOL_CONCURRENCY || 2), 4));
+      candidates = candidates.map((property, index) => index < limit ? property
+        : addDiagnostic(property, "school-rating", "warning", `School rating enrichment limit ${limit} reached.`));
+      await mapWithConcurrency(candidates.slice(0, limit).map((_, index) => index), concurrency, async (index) => {
+        let property = candidates[index];
+        if (hasCompleteRealtorSchoolEvidence(property)) {
+          candidates[index] = addDiagnostic(property, "school-assignment", "success",
+            "Reused complete elementary/middle/high school evidence displayed on the Realtor property page; official-locator fallback was not needed.");
+          return;
+        }
+        if (property.latitude == null || property.longitude == null) {
+          property = geoValidationService.enabled
+            ? await geoValidationService.ensureCoordinates(property)
+            : addDiagnostic(property, "school-assignment", "warning", "No HERE/Google geocoder is configured for official school assignment lookup.");
+        }
+        candidates[index] = await officialSchoolAssignmentService.enrichProperty(property);
+      });
     }
     const hasWaterCriterion = Boolean(criteria.communityFeatures?.some((item) => /lake|pond/i.test(item)));
     const hasMapCriteria = Boolean(criteria.distanceConstraints?.length || criteria.highwayAccess || hasWaterCriterion);
@@ -1287,7 +1290,7 @@ export function resolveFirecrawlBudget(criteria: SearchCriteria, configured = pr
   // PowerShell value such as RE_FIRECRAWL_REQUEST_BUDGET=15 must not silently
   // disable detail enrichment for the later candidates in a 20-property run.
   const hasFeatureCriteria = Boolean(criteria.exteriorMaterials?.length || criteria.communityFeatures?.length);
-  const minimum = hasSchoolCriteria ? 70 : hasFeatureCriteria ? 25 : 30;
+  const minimum = hasSchoolCriteria ? 100 : hasFeatureCriteria ? 25 : 30;
   const requested = Number(configured);
   return Number.isFinite(requested) && requested > minimum ? Math.min(requested, 100) : minimum;
 }
