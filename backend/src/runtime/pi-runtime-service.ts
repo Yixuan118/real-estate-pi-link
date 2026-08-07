@@ -26,7 +26,7 @@ export interface PiRuntimeInput {
   properties: unknown[];
 }
 
-class PiRuntimeService {
+export class PiRuntimeService {
   async analyze(input: PiRuntimeInput): Promise<PiRuntimeResult> {
     let scrapeSource = "";
     let scrapeWarning = "";
@@ -134,8 +134,18 @@ class PiRuntimeService {
       '  "warnings": ["..."]',
       "}",
     ].join("\n");
-    const raw = await this.callLLM(fullPrompt);
-    const result = this.parseJsonOrFallback(raw);
+    let result: PiRuntimeResult;
+    try {
+      const raw = await this.callLLM(fullPrompt);
+      result = this.parseJsonOrFallback(raw);
+    } catch (error) {
+      // Listing retrieval and criteriaMatch validation have already completed.
+      // The collaborator model improves narration, but an empty response,
+      // timeout, or transient provider error must not discard valid homes.
+      console.warn("[PiRuntime] Collaborator unavailable; using deterministic analysis:",
+        error instanceof Error ? error.message : String(error));
+      result = emptyPiRuntimeResult();
+    }
     this.applyDeterministicCollaboration(result, (input.properties || []).slice(0, 20) as Property[], input.criteria as SearchCriteria);
     if (scrapeWarning) {
       result.warnings.push(scrapeWarning);

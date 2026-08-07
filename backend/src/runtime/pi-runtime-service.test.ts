@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { defaultSearchCriteria, Property } from "../core/types";
-import { formatListingRetrievalError, parsePiRuntimeJson, piRuntimeService, PiRuntimeResult } from "./pi-runtime-service";
+import { formatListingRetrievalError, parsePiRuntimeJson, piRuntimeService, PiRuntimeResult, PiRuntimeService } from "./pi-runtime-service";
 
 test("Pi activity and ranking are replaced with deterministic evidence results", () => {
   const result: PiRuntimeResult = {
@@ -45,6 +45,31 @@ test("malformed collaborator JSON falls back to deterministic property analysis"
   assert.equal(result.assistant_message, "Analyzed 1 properties: 1 verified, 0 unknown, 0 failed.");
   assert.deepEqual(result.ranked_property_ids, ["boston-home"]);
   assert.equal(result.agent_activity.length, 4);
+});
+
+test("an empty or unavailable collaborator response cannot fail a completed basic search", async () => {
+  const service = new PiRuntimeService();
+  (service as any).callLLM = async () => { throw new Error("DeepSeek returned an empty response"); };
+  const previous = process.env.PI_RUNTIME_ENABLED;
+  process.env.PI_RUNTIME_ENABLED = "true";
+  try {
+    const property = candidate("three-bed", 600000, "verified", 100);
+    property.location = "Seattle, WA";
+    property.criteriaMatch = {
+      overall: "verified", score: 100,
+      checks: [{ criterion: "bedrooms exactly 3", status: "verified", detail: "Listing has exactly 3 bedrooms." }],
+    };
+    const result = await service.analyze({
+      userMessage: "Find 3-bedroom homes in Seattle, WA.",
+      criteria: { ...defaultSearchCriteria(), location: "Seattle, WA", exactBedrooms: 3 },
+      properties: [property],
+    });
+    assert.equal(result.assistant_message, "Analyzed 1 properties: 1 verified, 0 unknown, 0 failed.");
+    assert.deepEqual(result.ranked_property_ids, ["three-bed"]);
+  } finally {
+    if (previous == null) delete process.env.PI_RUNTIME_ENABLED;
+    else process.env.PI_RUNTIME_ENABLED = previous;
+  }
 });
 
 function candidate(id: string, price: number, overall: "verified" | "unknown" | "failed", score: number): Property {
