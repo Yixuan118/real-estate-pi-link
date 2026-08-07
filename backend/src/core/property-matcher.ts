@@ -390,7 +390,13 @@ export function assessProperty(property: Property, criteria: SearchCriteria): Pr
       : failed(`price at most $${criteria.maxPrice.toLocaleString("en-US")}`, `Listing price is $${property.price.toLocaleString("en-US")}.`));
   }
 
-  if (criteria.minBedrooms != null) {
+  if (criteria.exactBedrooms != null) {
+    checks.push(property.bedrooms <= 0 && !property.bedroomsSource
+      ? unknown(`bedrooms exactly ${criteria.exactBedrooms}`, "The bedroom count was not available from the listing source.")
+      : property.bedrooms === criteria.exactBedrooms
+      ? verified(`bedrooms exactly ${criteria.exactBedrooms}`, `Listing has exactly ${property.bedrooms} bedroom(s).`)
+      : failed(`bedrooms exactly ${criteria.exactBedrooms}`, `Listing has ${property.bedrooms} bedroom(s), not exactly ${criteria.exactBedrooms}.`));
+  } else if (criteria.minBedrooms != null) {
     checks.push(property.bedrooms <= 0 && !property.bedroomsSource
       ? unknown(`bedrooms at least ${criteria.minBedrooms}`, "The bedroom count was not available from the listing source.")
       : property.bedrooms >= criteria.minBedrooms

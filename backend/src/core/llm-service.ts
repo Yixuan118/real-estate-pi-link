@@ -33,6 +33,7 @@ export async function extractCriteriaFromMessage(
         if (result.updatedCriteria.location) candidateCriteria.location = result.updatedCriteria.location;
         if (result.updatedCriteria.minPrice !== undefined) candidateCriteria.minPrice = result.updatedCriteria.minPrice;
         if (result.updatedCriteria.maxPrice !== undefined) candidateCriteria.maxPrice = result.updatedCriteria.maxPrice;
+        if (result.updatedCriteria.exactBedrooms !== undefined) candidateCriteria.exactBedrooms = result.updatedCriteria.exactBedrooms;
         if (result.updatedCriteria.minBedrooms !== undefined) candidateCriteria.minBedrooms = result.updatedCriteria.minBedrooms;
         if (result.updatedCriteria.minBathrooms !== undefined) candidateCriteria.minBathrooms = result.updatedCriteria.minBathrooms;
         if (result.updatedCriteria.propertyType) candidateCriteria.propertyType = result.updatedCriteria.propertyType;
@@ -83,6 +84,13 @@ export async function extractCriteriaFromMessage(
     candidateCriteria.exteriorMaterials ||= deterministic.criteria.exteriorMaterials;
     candidateCriteria.communityFeatures ||= deterministic.criteria.communityFeatures;
     candidateCriteria.highwayAccess ||= deterministic.criteria.highwayAccess;
+    if (deterministic.criteria.exactBedrooms !== undefined) {
+      candidateCriteria.exactBedrooms = deterministic.criteria.exactBedrooms;
+      candidateCriteria.minBedrooms = undefined;
+    } else if (deterministic.criteria.minBedrooms !== undefined) {
+      candidateCriteria.minBedrooms = deterministic.criteria.minBedrooms;
+      candidateCriteria.exactBedrooms = undefined;
+    }
     if (candidateCriteria.schoolMinRating === undefined) candidateCriteria.schoolMinRating = deterministic.criteria.schoolMinRating;
     if (candidateCriteria.schoolAtLeastOneRating === undefined) candidateCriteria.schoolAtLeastOneRating = deterministic.criteria.schoolAtLeastOneRating;
     if (candidateCriteria.schoolAssignmentRequired === undefined) candidateCriteria.schoolAssignmentRequired = deterministic.criteria.schoolAssignmentRequired;
@@ -137,7 +145,7 @@ async function callLLM(current: SearchCriteria, userMessage: string, history: st
  Return JSON with:
  1. "reasoning": brief analysis
  2. "updatedCriteria": partial criteria updates (only changed fields)
-    - location, maxPrice, minPrice, minBedrooms, minBathrooms, propertyType, mustHave, exteriorMaterials, communityFeatures, distanceConstraints, schoolMinRating, schoolAtLeastOneRating, schoolAssignmentRequired, schoolAlternativePolicy, highwayAccess
+    - location, maxPrice, minPrice, exactBedrooms, minBedrooms, minBathrooms, propertyType, mustHave, exteriorMaterials, communityFeatures, distanceConstraints, schoolMinRating, schoolAtLeastOneRating, schoolAssignmentRequired, schoolAlternativePolicy, highwayAccess
  3. "responseToUser": friendly natural response confirming what you understood
  
  Rules:
@@ -146,7 +154,8 @@ async function callLLM(current: SearchCriteria, userMessage: string, history: st
  - **CRITICAL: Never include price-related words ("priced", "under", "million", "budget", "k", "thousand") in the location field**
  - Extract maxPrice from "under 1M" -> 1000000, "budget 500k" -> 500000, "priced under 1 million" -> 1000000
  - **Always output maxPrice in absolute dollar amounts** (e.g., $1M → 1000000, $500k → 500000, never "1" without unit conversion)
- - Extract minBedrooms from "3 bed" -> 3
+ - Interpret an unqualified count such as "3-bedroom home" or "3 bedrooms" as exactBedrooms=3.
+ - Use minBedrooms=3 only for explicit minimum language such as "at least 3 bedrooms", "3+ bedrooms", or Chinese "至少3卧室".
 - Extract features from "pool", "garage", "garden", "view"
 - Put every requested fact that could be verified from a listing detail page and is not represented by a dedicated field above into mustHave as a concise phrase. Never silently discard an unfamiliar requirement.
 - Extract exteriorMaterials from "four-sided brick", "brick on all four sides", or Chinese "四面砖墙" -> ["brick"]. Do not reduce this to a generic mustHave feature.
@@ -247,8 +256,19 @@ export function regexExtract(input: string, current: SearchCriteria): { criteria
   const underMatch = lower.match(/(?:under|priced under|budget|max)\s*\$?(\d+(?:\.\d+)?)\s*(m|k|million|thousand|mil)?/i);
   if (underMatch) { criteria.maxPrice = parsePrice(underMatch[1], underMatch[2]); changes.push("Max price: $" + criteria.maxPrice!.toLocaleString()); }
 
-  const bedMatch = lower.match(/(?:\d+)\s*(?:bed|br|bedroom)/i);
-  if (bedMatch) { criteria.minBedrooms = parseInt(bedMatch[0].match(/\d+/)?.[0] || "0"); changes.push("At least " + criteria.minBedrooms + " bed"); }
+  const minimumBedMatch = normalizedInput.match(/(?:at\s+least|minimum(?:\s+of)?|no\s+fewer\s+than|不少于|至少)\s*(\d+)\s*(?:[- ]?bed(?:room)?s?|br|卧室|室)/i)
+    || normalizedInput.match(/(\d+)\s*\+\s*(?:bed(?:room)?s?|br|卧室|室)/i);
+  const exactBedMatch = normalizedInput.match(/\b(\d+)\s*[- ]?(?:bed(?:room)?s?|br)\b/i)
+    || normalizedInput.match(/(\d+)\s*(?:卧室|室)(?!\s*(?:以上|起|或更多))/i);
+  if (minimumBedMatch) {
+    criteria.minBedrooms = Number(minimumBedMatch[1]);
+    criteria.exactBedrooms = undefined;
+    changes.push("At least " + criteria.minBedrooms + " bedrooms");
+  } else if (exactBedMatch) {
+    criteria.exactBedrooms = Number(exactBedMatch[1]);
+    criteria.minBedrooms = undefined;
+    changes.push("Exactly " + criteria.exactBedrooms + " bedrooms");
+  }
 
   const fourSidedBrick = /\b(?:four[- ]sided|4[- ]sided|all[- ]brick|brick (?:walls? )?on (?:all|four) sides)\b/i.test(normalizedInput)
     || /(?:四|4)面(?:外?墙)?(?:都?是)?砖|全砖外墙/.test(normalizedInput);

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { extractCoreListingMetrics, extractPropertyEvidence } from "../core/property-matcher";
 import { defaultSearchCriteria, Property, UserSession } from "../core/types";
-import { bathroomVerificationPriority, canonicalMarketLocation, detailNeedsInteractiveExpansion, extractInteractText, extractVisibleSearchCardMetrics, FirecrawlSkill, isSchoolOnlyDetailRequest, prepareDetailEvidenceContent, prepareSearchPagePropertyEvidence, prioritizeCandidatesForCriteria, requiresListingDetail, resolveBathroomVerificationTimeouts, resolveFeatureEnrichmentLimit, resolveFirecrawlBudget, selectCachedLiveProperties, shouldUseCachedMarket, shouldVerifyBathroomsSeparately } from "./firecrawl-skill";
+import { bathroomVerificationPriority, canonicalMarketLocation, detailNeedsInteractiveExpansion, extractInteractText, extractVisibleSearchCardMetrics, FirecrawlSkill, isSchoolOnlyDetailRequest, matchesBedroomCriteria, prepareDetailEvidenceContent, prepareSearchPagePropertyEvidence, prioritizeCandidatesForCriteria, requiresListingDetail, resolveBathroomVerificationTimeouts, resolveFeatureEnrichmentLimit, resolveFirecrawlBudget, selectCachedLiveProperties, shouldUseCachedMarket, shouldVerifyBathroomsSeparately } from "./firecrawl-skill";
 
 test("caps the assessed result set at 20 properties", async () => {
   const properties: Property[] = Array.from({ length: 30 }, (_, index) => ({
@@ -118,6 +118,16 @@ test("stale low budget environment values cannot disable school detail enrichmen
 test("school detail pages replace redundant exact-address bathroom searches", () => {
   assert.equal(shouldVerifyBathroomsSeparately({ ...defaultSearchCriteria(), location: "Athens, GA", schoolMinRating: 5 }), false);
   assert.equal(shouldVerifyBathroomsSeparately({ ...defaultSearchCriteria(), location: "Seattle, WA", minBedrooms: 3 }), true);
+});
+
+test("listing filters enforce exact bedrooms without changing explicit minimum searches", () => {
+  const property: Property = {
+    id: "bed-filter", title: "Seattle home", price: 1, bedrooms: 4, bedroomsSource: "listing-card",
+    bathrooms: 2, sqft: 1, location: "Seattle, WA", features: [], url: "",
+    listedAt: new Date().toISOString(), source: "test",
+  };
+  assert.equal(matchesBedroomCriteria(property, { ...defaultSearchCriteria(), exactBedrooms: 3 }), false);
+  assert.equal(matchesBedroomCriteria(property, { ...defaultSearchCriteria(), minBedrooms: 3 }), true);
 });
 
 test("suspicious large-home bathroom summaries are prioritized for exact detail verification", () => {

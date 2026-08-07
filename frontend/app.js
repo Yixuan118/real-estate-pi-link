@@ -163,7 +163,8 @@ function renderCriteria(criteria) {
   if (criteria.location) tags.push({ label: "Location", value: criteria.location });
   if (criteria.minPrice != null) tags.push({ label: "Min price", value: formatPrice(criteria.minPrice) });
   if (criteria.maxPrice != null) tags.push({ label: "Max price", value: formatPrice(criteria.maxPrice) });
-  if (criteria.minBedrooms != null) tags.push({ label: "Bedrooms", value: `≥ ${criteria.minBedrooms}` });
+  if (criteria.exactBedrooms != null) tags.push({ label: "Bedrooms", value: `= ${criteria.exactBedrooms}` });
+  else if (criteria.minBedrooms != null) tags.push({ label: "Bedrooms", value: `≥ ${criteria.minBedrooms}` });
   if (criteria.minBathrooms != null) tags.push({ label: "Bathrooms", value: `≥ ${criteria.minBathrooms}` });
   if (criteria.propertyType) tags.push({ label: "Type", value: criteria.propertyType });
   if (criteria.mustHave && criteria.mustHave.length > 0) {

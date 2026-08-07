@@ -161,6 +161,8 @@ class PiRuntimeService {
     const failed = properties.filter((property) => property.criteriaMatch?.overall === "failed").length;
     const unknown = properties.length - verified - failed;
     const criteriaSummary = [
+      ...(criteria.exactBedrooms != null ? [`bedrooms=${criteria.exactBedrooms}`] : []),
+      ...(criteria.minBedrooms != null ? [`bedrooms>=${criteria.minBedrooms}`] : []),
       ...(criteria.exteriorMaterials || []).map((item) => `exterior:${item}`),
       ...(criteria.communityFeatures || []).map((item) => `community:${item}`),
       ...(criteria.distanceConstraints || []).map((item) => `${item.name}<=${item.maxMiles}mi`),

@@ -180,6 +180,7 @@ export interface SearchCriteria {
   location?: string;
   minPrice?: number;
   maxPrice?: number;
+  exactBedrooms?: number;
   minBedrooms?: number;
   minBathrooms?: number;
   propertyType?: string;
@@ -200,6 +201,7 @@ export function defaultSearchCriteria(): SearchCriteria {
     location: undefined,
     minPrice: undefined,
     maxPrice: undefined,
+    exactBedrooms: undefined,
     minBedrooms: undefined,
     minBathrooms: undefined,
     propertyType: undefined,

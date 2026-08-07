@@ -52,9 +52,7 @@ export class FirecrawlSkill {
         if (criteria.maxPrice != null && p.price > criteria.maxPrice) return false;
         // Zero is the legacy sentinel for "not extracted", not evidence that a
         // listing has zero rooms. Keep unknowns until detail enrichment/assessment.
-        if (criteria.minBedrooms != null
-            && (p.bedroomsSource || p.bedrooms > 0)
-            && p.bedrooms < criteria.minBedrooms) return false;
+        if (!matchesBedroomCriteria(p, criteria)) return false;
         if (criteria.minBathrooms != null && p.bathrooms > 0 && p.bathrooms < criteria.minBathrooms) return false;
         // Do not reject feature requirements from search cards. Many Realtor
         // facts only appear on the detail page and are evaluated after enrichment.
@@ -963,9 +961,7 @@ export class FirecrawlSkill {
 
     if (props.length > 0) {
       const filteredProps = props.filter((p: any) => {
-        if (criteria.minBedrooms
-            && (p.bedroomsSource || p.bedrooms > 0)
-            && p.bedrooms < criteria.minBedrooms) return false;
+        if (!matchesBedroomCriteria(p, criteria)) return false;
         if (criteria.minBathrooms && p.bathrooms > 0 && p.bathrooms < criteria.minBathrooms) return false;
         if (criteria.maxPrice && p.price > criteria.maxPrice) return false;
         if (criteria.minPrice && p.price < criteria.minPrice) return false;
@@ -1047,7 +1043,7 @@ export class FirecrawlSkill {
       }
       if (criteria.minPrice && p.price < criteria.minPrice) return false;
       if (criteria.maxPrice && p.price > criteria.maxPrice) return false;
-      if (criteria.minBedrooms && p.bedrooms < criteria.minBedrooms) return false;
+      if (!matchesBedroomCriteria(p, criteria)) return false;
       if (criteria.minBathrooms && p.bathrooms < criteria.minBathrooms) return false;
       if (criteria.mustHave && criteria.mustHave.length > 0) {
         for (const f of criteria.mustHave) {
@@ -1067,6 +1063,14 @@ function rankAssessedProperties(properties: Property[], criteria: SearchCriteria
       const statusDifference = statusOrder[a.criteriaMatch.overall] - statusOrder[b.criteriaMatch.overall];
       return statusDifference || b.criteriaMatch.score - a.criteriaMatch.score || a.price - b.price;
     });
+}
+
+export function matchesBedroomCriteria(property: Property, criteria: SearchCriteria): boolean {
+  const hasBedroomEvidence = Boolean(property.bedroomsSource || property.bedrooms > 0);
+  if (!hasBedroomEvidence) return true;
+  if (criteria.exactBedrooms != null) return property.bedrooms === criteria.exactBedrooms;
+  if (criteria.minBedrooms != null) return property.bedrooms >= criteria.minBedrooms;
+  return true;
 }
 
 export function prioritizeCandidatesForCriteria(properties: Property[], criteria: SearchCriteria): Property[] {

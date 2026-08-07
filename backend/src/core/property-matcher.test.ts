@@ -110,6 +110,19 @@ test("1080 Belmont Realtor Schools panel produces a failed rating check instead 
 test("extracts an arbitrary bare US city after a location preposition", () => {
   const result = regexExtract("Find homes in Boise with 3 bedrooms", defaultSearchCriteria());
   assert.equal(result.criteria.location, "Boise");
+  assert.equal(result.criteria.exactBedrooms, 3);
+  assert.equal(result.criteria.minBedrooms, undefined);
+});
+
+test("distinguishes exact bedroom counts from explicit minimums in English and Chinese", () => {
+  const exactEnglish = regexExtract("Find 3-bedroom homes in Seattle, WA", defaultSearchCriteria()).criteria;
+  const minimumEnglish = regexExtract("Find homes in Seattle, WA with at least 3 bedrooms", defaultSearchCriteria()).criteria;
+  const exactChinese = regexExtract("我想找 Athens, GA 的三卧室房子", defaultSearchCriteria()).criteria;
+  const minimumChinese = regexExtract("我想找 Athens, GA 至少三卧室的房子", defaultSearchCriteria()).criteria;
+  assert.deepEqual([exactEnglish.exactBedrooms, exactEnglish.minBedrooms], [3, undefined]);
+  assert.deepEqual([minimumEnglish.exactBedrooms, minimumEnglish.minBedrooms], [undefined, 3]);
+  assert.deepEqual([exactChinese.exactBedrooms, exactChinese.minBedrooms], [3, undefined]);
+  assert.deepEqual([minimumChinese.exactBedrooms, minimumChinese.minBedrooms], [undefined, 3]);
 });
 
 test("preserves explicit states and foreign qualifiers for strict location resolution", () => {
@@ -174,6 +187,17 @@ test("verifies basic location and bedroom criteria instead of marking every resu
   });
   assert.equal(match.overall, "verified");
   assert.equal(match.checks.length, 2);
+});
+
+test("an unqualified three-bedroom request rejects four-bedroom listings", () => {
+  const base: Property = {
+    id: "exact-bed", title: "Seattle home", price: 650000, bedrooms: 3, bedroomsSource: "listing-card",
+    bathrooms: 2, sqft: 1600, location: "Seattle, WA", features: [], url: "",
+    listedAt: new Date().toISOString(), source: "test",
+  };
+  const criteria = { ...defaultSearchCriteria(), location: "Seattle, WA", exactBedrooms: 3 };
+  assert.equal(assessProperty(base, criteria).overall, "verified");
+  assert.equal(assessProperty({ ...base, id: "four-bed", bedrooms: 4 }, criteria).overall, "failed");
 });
 
 test("a source-backed Studio fails a three-bedroom requirement instead of becoming unknown", () => {

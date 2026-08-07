@@ -48,6 +48,7 @@ async function handleMessage(msg: any) {
               properties: {
                 location: { type: "string", description: "City to search (e.g., Seattle, New York)" },
                 maxPrice: { type: "number", description: "Maximum price in USD" },
+                exactBedrooms: { type: "number", description: "Exact bedroom count" },
                 minBedrooms: { type: "number", description: "Minimum bedrooms" },
                 minBathrooms: { type: "number", description: "Minimum bathrooms" },
                 propertyType: { type: "string", description: "Property type: house, condo, townhouse" },
@@ -123,6 +124,7 @@ async function handleSearchProperties(id: any, args: any) {
     const criteria: SearchCriteria = {
       location: args.location || "",
       maxPrice: args.maxPrice,
+      exactBedrooms: args.exactBedrooms,
       minBedrooms: args.minBedrooms,
       minBathrooms: args.minBathrooms,
       propertyType: args.propertyType,
